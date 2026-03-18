@@ -44,399 +44,6 @@ public:
         Shutdown();
     }
 
-    /*
-    # Simple USB Capture - Usage Guide
-
-## Overview
-
-This is a simplified, production-ready USB capture implementation based on best practices. It's designed to be:
-- **Simple**: Clean API with minimal complexity
-- **Robust**: Proper error handling and resource management
-- **Fast**: Zero-copy D3D11 texture output
-- **Safe**: Thread-safe with proper cleanup
-
-## Quick Start
-
-### 1. List Available Devices
-
-```cpp
-#include "SimpleUSBCapture.h"
-
-// Static method - lists all USB capture devices
-auto devices = SimpleUSBCapture::EnumerateDevices();
-
-for (const auto& dev : devices) {
-    spdlog::info("Device {}: {} ({}x{}@{}fps)", 
-        dev.index, dev.name, dev.width, dev.height, dev.fps);
-}
-```
-
-### 2. Initialize and Capture
-
-```cpp
-// Create D3D11 device (or use existing one)
-ComPtr<ID3D11Device> device;
-D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, 
-                  nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr);
-
-// Create capture instance
-SimpleUSBCapture capture;
-
-// Initialize with device index (0 = first device)
-if (!capture.Initialize(0, device)) {
-    spdlog::error("Failed to initialize USB capture");
-    return;
-}
-
-// Start capturing with 16-frame buffer
-if (!capture.Start(16)) {
-    spdlog::error("Failed to start capture");
-    return;
-}
-
-// Capture loop
-USBFrame frame;
-while (capture.GetFrame(frame, 100)) {  // 100ms timeout
-    // frame.texture is a ID3D11Texture2D ready to use
-    // frame.timestamp is in microseconds
-    // frame.frameIndex is sequential
-    
-    ProcessFrame(frame.texture);
-}
-
-// Stop (also happens automatically in destructor)
-capture.Stop();
-```
-
-## Integration with Your Recording Engine
-
-### Replace Your USB Capture
-
-```cpp
-// In your RecordingPipeline or main recording code:
-
-// OLD:
-// USBCapture usbCapture;
-// usbCapture.Initialize(deviceIndex, d3d11Device, d3d11Context);
-
-// NEW:
-SimpleUSBCapture usbCapture;
-usbCapture.Initialize(deviceIndex, d3d11Device);  // Simpler API
-
-// Rest is the same:
-usbCapture.Start(32);
-
-USBFrame frame;
-while (usbCapture.GetFrame(frame, 100)) {
-    // Encode frame.texture
-    EncodeFrame(frame);
-}
-
-usbCapture.Stop();
-```
-
-### With Your Hardware Encoder
-
-```cpp
-SimpleUSBCapture capture;
-HardwareEncoder encoder;
-
-// Initialize both
-capture.Initialize(0, m_d3d11Device);
-encoder.Initialize(gpuInfo, settings, m_d3d11Device, m_d3d11Context);
-
-// Start capture
-capture.Start(32);
-
-// Capture and encode loop
-USBFrame usbFrame;
-while (capture.GetFrame(usbFrame, 100)) {
-    // Convert to your CapturedFrame format
-    CapturedFrame capturedFrame;
-    capturedFrame.texture = usbFrame.texture;
-    capturedFrame.timestamp = usbFrame.timestamp;
-    capturedFrame.frameIndex = usbFrame.frameIndex;
-    capturedFrame.isKeyframe = (usbFrame.frameIndex % 60 == 0);
-    
-    // Encode
-    std::vector<EncodedPacket> packets;
-    if (encoder.EncodeFrame(capturedFrame, packets)) {
-        // Write packets to disk
-        for (auto& packet : packets) {
-            WritePacket(packet);
-        }
-    }
-}
-```
-
-## API Reference
-
-### Static Methods
-
-```cpp
-// List all available USB capture devices
-static std::vector<USBCaptureDevice> EnumerateDevices();
-```
-
-### Instance Methods
-
-```cpp
-// Initialize with device index and D3D11 device
-bool Initialize(int deviceIndex, ComPtr<ID3D11Device> d3d11Device);
-
-// Start capture with specified buffer size
-bool Start(uint32_t bufferSize = 16);
-
-// Stop capture
-void Stop();
-
-// Get next frame (blocking with timeout)
-bool GetFrame(USBFrame& frame, uint32_t timeoutMs = 100);
-
-// Get current resolution
-uint32_t GetWidth() const;
-uint32_t GetHeight() const;
-
-// Check if currently capturing
-bool IsRunning() const;
-```
-
-### Structures
-
-```cpp
-struct USBCaptureDevice {
-    std::string name;      // Device friendly name
-    int index;             // Device index for Initialize()
-    uint32_t width;        // Native width
-    uint32_t height;       // Native height
-    uint32_t fps;          // Native framerate
-};
-
-struct USBFrame {
-    ComPtr<ID3D11Texture2D> texture;  // D3D11 texture (BGRA format)
-    uint64_t timestamp;                // Microseconds
-    uint32_t frameIndex;               // Sequential frame number
-};
-```
-
-## Key Differences from Original
-
-| Feature | Original | Simple Version |
-|---------|----------|----------------|
-| Context parameter | Required | Auto-retrieved from device |
-| Format handling | Manual fallback | Automatic RGB32 with fallback |
-| Error recovery | Partial | Full with detailed logging |
-| Device enumeration | None | Built-in EnumerateDevices() |
-| Buffer validation | Basic | Complete size checking |
-| Thread safety | Good | Enhanced with proper cleanup |
-| Resource cleanup | Manual tracking | Automatic with flags |
-
-## Common Usage Patterns
-
-### Pattern 1: Device Selection UI
-
-```cpp
-// Get list of devices for UI
-auto devices = SimpleUSBCapture::EnumerateDevices();
-
-if (devices.empty()) {
-    ShowError("No USB capture devices found");
-    return;
-}
-
-// Show in dropdown/list
-for (size_t i = 0; i < devices.size(); i++) {
-    std::string label = devices[i].name + 
-        " (" + std::to_string(devices[i].width) + "x" + 
-        std::to_string(devices[i].height) + ")";
-    AddToDeviceList(label, i);
-}
-
-// When user selects:
-int selectedIndex = GetSelectedDeviceIndex();
-capture.Initialize(selectedIndex, device);
-```
-
-### Pattern 2: Auto-select Best Device
-
-```cpp
-auto devices = SimpleUSBCapture::EnumerateDevices();
-
-// Find highest resolution device
-int bestIndex = 0;
-uint32_t maxPixels = 0;
-
-for (const auto& dev : devices) {
-    uint32_t pixels = dev.width * dev.height;
-    if (pixels > maxPixels) {
-        maxPixels = pixels;
-        bestIndex = dev.index;
-    }
-}
-
-spdlog::info("Auto-selected: {}", devices[bestIndex].name);
-capture.Initialize(bestIndex, device);
-```
-
-### Pattern 3: Reconnect on Error
-
-```cpp
-bool captureActive = true;
-
-while (applicationRunning) {
-    SimpleUSBCapture capture;
-    
-    if (!capture.Initialize(deviceIndex, device)) {
-        spdlog::error("Failed to open device, retrying in 5s...");
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-        continue;
-    }
-    
-    capture.Start(32);
-    
-    USBFrame frame;
-    while (captureActive && capture.GetFrame(frame, 1000)) {
-        ProcessFrame(frame);
-    }
-    
-    spdlog::warn("Capture stopped, reconnecting...");
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-}
-```
-
-## Performance Tips
-
-1. **Buffer Size**: 
-   - 16 frames = ~500ms at 30fps (good for realtime)
-   - 32 frames = ~1s at 30fps (better for burst handling)
-   - 64+ frames = Use for high-latency encoding
-
-2. **Timeout**:
-   - 100ms = Responsive for realtime
-   - 1000ms = More tolerant of device delays
-   - 0ms = Non-blocking (check immediately)
-
-3. **Thread Priority**:
-   The capture thread runs at normal priority. To elevate:
-   ```cpp
-   // After Start():
-   // The thread is already created, you can't change priority externally
-   // Priority is set inside the class (see implementation)
-   ```
-
-## Troubleshooting
-
-### Device Not Found
-```
-Error: No USB capture devices found
-```
-**Solutions**:
-- Check device is plugged in
-- Check Device Manager (Windows)
-- Close other apps using the device (OBS, Zoom, etc.)
-- Try different USB port
-- Reinstall device drivers
-
-### Format Not Supported
-```
-Warning: RGB32 not supported, using default format
-```
-**Solutions**:
-- This is usually OK, capture will work with device's native format
-- Check device supports video capture (not just audio)
-- Update device firmware
-
-### Buffer Size Mismatch
-```
-Warning: Buffer size mismatch: 2073600 < 8294400
-```
-**Solutions**:
-- Device resolution may have changed
-- Re-enumerate devices to get actual resolution
-- Call Initialize() again
-
-### Stream Error
-```
-Error: Stream error
-```
-**Solutions**:
-- Device was unplugged
-- Device crashed/froze
-- USB bandwidth exceeded
-- Try lower resolution or framerate
-
-## Migration Checklist
-
-To replace your current USBCapture with SimpleUSBCapture:
-
-- [ ] Replace `#include "usbcapture.h"` with `#include "SimpleUSBCapture.h"`
-- [ ] Change `USBCapture` to `SimpleUSBCapture`
-- [ ] Remove `d3d11Context` parameter from `Initialize()`
-- [ ] Update `GetNextFrame()` calls to `GetFrame()`
-- [ ] Add device enumeration UI using `EnumerateDevices()`
-- [ ] Test with your capture device
-- [ ] Verify resolution and framerate
-- [ ] Check logs for any warnings
-
-## Example: Complete Recording App
-
-```cpp
-#include "SimpleUSBCapture.h"
-#include "HardwareEncoder.h"
-#include "DiskWriter.h"
-
-int main() {
-    // Setup logging
-    spdlog::set_level(spdlog::level::info);
-    
-    // List devices
-    auto devices = SimpleUSBCapture::EnumerateDevices();
-    if (devices.empty()) {
-        spdlog::error("No devices found");
-        return 1;
-    }
-    
-    // Create D3D11 device
-    ComPtr<ID3D11Device> device;
-    D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-                      nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr);
-    
-    // Initialize capture
-    SimpleUSBCapture capture;
-    if (!capture.Initialize(0, device)) {
-        spdlog::error("Failed to initialize");
-        return 1;
-    }
-    
-    spdlog::info("Capturing at {}x{}", capture.GetWidth(), capture.GetHeight());
-    
-    // Start capture
-    capture.Start(32);
-    
-    // Capture for 10 seconds
-    auto startTime = std::chrono::steady_clock::now();
-    USBFrame frame;
-    uint32_t frameCount = 0;
-    
-    while (capture.GetFrame(frame, 100)) {
-        frameCount++;
-        
-        // Process frame here
-        // ...
-        
-        auto elapsed = std::chrono::steady_clock::now() - startTime;
-        if (elapsed > std::chrono::seconds(10)) {
-            break;
-        }
-    }
-    
-    capture.Stop();
-    
-    spdlog::info("Captured {} frames", frameCount);
-    return 0;
-}
-```*/
-
     // ========== PUBLIC API ==========
 
     // List all available USB capture devices
@@ -701,8 +308,16 @@ int main() {
         }
 
         // Clear buffer
-        std::lock_guard<std::mutex> lock(m_mutex);
-        while (!m_frameQueue.empty()) m_frameQueue.pop();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            while (!m_frameQueue.empty()) m_frameQueue.pop();
+        }
+
+        // Clear texture pool
+        {
+            std::lock_guard<std::mutex> lock(m_poolMutex);
+            while (!m_texturePool.empty()) m_texturePool.pop();
+        }
     }
 
     // Get next captured frame (blocking with timeout)
@@ -724,6 +339,13 @@ int main() {
         frame = m_frameQueue.front();
         m_frameQueue.pop();
         return true;
+    }
+
+    // Return texture to pool for reuse (Fixes memory leak)
+    void ReturnTexture(ComPtr<ID3D11Texture2D> texture) {
+        if (!texture) return;
+        std::lock_guard<std::mutex> lock(m_poolMutex);
+        m_texturePool.push(texture);
     }
 
     // Get current resolution
@@ -816,6 +438,7 @@ private:
 
                     // Drop oldest if full
                     if (m_frameQueue.size() >= m_bufferSize) {
+                        ReturnTexture(m_frameQueue.front().texture);
                         m_frameQueue.pop();
                     }
 
@@ -852,30 +475,44 @@ private:
             return nullptr;
         }
 
-        // Create D3D11 texture
+        // Get or Create D3D11 texture
         ComPtr<ID3D11Texture2D> texture;
-        D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = m_width;
-        desc.Height = m_height;
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        {
+            std::lock_guard<std::mutex> lock(m_poolMutex);
+            if (!m_texturePool.empty()) {
+                texture = m_texturePool.front();
+                m_texturePool.pop();
 
-        D3D11_SUBRESOURCE_DATA initData = {};
-        initData.pSysMem = data;
-        initData.SysMemPitch = m_width * 4;
-
-        hr = m_d3d11Device->CreateTexture2D(&desc, &initData, &texture);
-        buffer->Unlock();
-
-        if (FAILED(hr)) {
-            spdlog::warn("CreateTexture2D failed: 0x{:08X}", static_cast<uint32_t>(hr));
-            return nullptr;
+                D3D11_TEXTURE2D_DESC desc;
+                texture->GetDesc(&desc);
+                if (desc.Width != m_width || desc.Height != m_height || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+                    texture.Reset(); // Wrong size/format, create new
+                }
+            }
         }
 
+        if (!texture) {
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = m_width;
+            desc.Height = m_height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+            hr = m_d3d11Device->CreateTexture2D(&desc, nullptr, &texture);
+            if (FAILED(hr)) {
+                buffer->Unlock();
+                return nullptr;
+            }
+        }
+
+        // Update texture data
+        m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, data, m_width * 4, 0);
+
+        buffer->Unlock();
         return texture;
     }
 
@@ -905,4 +542,8 @@ private:
     std::queue<USBFrame> m_frameQueue;
     std::mutex m_mutex;
     std::condition_variable m_frameAvailable;
+
+    // Texture Pool (Fixes memory leak)
+    std::queue<ComPtr<ID3D11Texture2D>> m_texturePool;
+    std::mutex m_poolMutex;
 };

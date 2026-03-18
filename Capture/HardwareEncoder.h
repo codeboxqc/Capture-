@@ -57,17 +57,42 @@ public:
             }
         }
         else if (gpuInfo.encoderType == EncoderType::AMD_AMF) {
-            if (settings.codec == Codec::H265) codec = avcodec_find_encoder_by_name("hevc_amf");
-            else codec = avcodec_find_encoder_by_name("h264_amf");
+            if (settings.codec == Codec::AV1) {
+                codecName = "av1_amf";
+                codec = avcodec_find_encoder_by_name("av1_amf");
+            }
+            if (!codec) {
+                if (settings.codec == Codec::H265) {
+                    codecName = "hevc_amf";
+                    codec = avcodec_find_encoder_by_name("hevc_amf");
+                }
+                else {
+                    codecName = "h264_amf";
+                    codec = avcodec_find_encoder_by_name("h264_amf");
+                }
+            }
         }
         else if (gpuInfo.encoderType == EncoderType::INTEL_QSV) {
-            if (settings.codec == Codec::H265) codec = avcodec_find_encoder_by_name("hevc_qsv");
-            else codec = avcodec_find_encoder_by_name("h264_qsv");
+            if (settings.codec == Codec::AV1) {
+                codecName = "av1_qsv";
+                codec = avcodec_find_encoder_by_name("av1_qsv");
+            }
+            if (!codec) {
+                if (settings.codec == Codec::H265) {
+                    codecName = "hevc_qsv";
+                    codec = avcodec_find_encoder_by_name("hevc_qsv");
+                }
+                else {
+                    codecName = "h264_qsv";
+                    codec = avcodec_find_encoder_by_name("h264_qsv");
+                }
+            }
         }
 
         if (!codec) {
             spdlog::warn("Hardware encoder '{}' not found, falling back to software", codecName);
             if (settings.codec == Codec::H265) codec = avcodec_find_encoder(AV_CODEC_ID_HEVC);
+            else if (settings.codec == Codec::AV1) codec = avcodec_find_encoder(AV_CODEC_ID_AV1);
             else codec = avcodec_find_encoder(AV_CODEC_ID_H264);
         }
 
@@ -108,8 +133,8 @@ public:
             framesCtx->sw_format = AV_PIX_FMT_BGRA;
             framesCtx->width = settings.width;
             framesCtx->height = settings.height;
-            // FIX 1: Larger pre-allocated VRAM pool to reduce allocation stuttering
-            framesCtx->initial_pool_size = 96;  // Increased from 64 to 96
+            // MAX QUALITY/PERFORMANCE: Large pre-allocated VRAM pool to handle 4K 120fps
+            framesCtx->initial_pool_size = 128; // Increased from 96
 
             if (av_hwframe_ctx_init(m_hwFramesCtx) < 0) {
                 spdlog::error("Failed to initialize hardware frames context");
@@ -166,31 +191,36 @@ public:
         m_codecContext->time_base = { 1, static_cast<int>(settings.fps) };
         m_codecContext->framerate = { static_cast<int>(settings.fps), 1 };
         m_codecContext->gop_size = settings.fps * 2;
+        m_codecContext->max_b_frames = 0; // Low latency, high performance
+        m_codecContext->bit_rate = 0; // Use QP/CRF for best quality
 
-        // FIX 2: NO B-FRAMES! B-Frames force the encoder to delay packets, overflowing the buffer in real-time capture!
-        m_codecContext->max_b_frames = 0;
-
-        m_codecContext->bit_rate = 0;
-        int targetQuality = 18;
+        // BEST QUALITY PRIORITY: QP 12 (Extremely high quality, near-lossless)
+        int targetQuality = 12;
 
         if (gpuInfo.encoderType == EncoderType::NVIDIA_NVENC) {
-            av_opt_set(m_codecContext->priv_data, "preset", "p4", 0);
-            av_opt_set(m_codecContext->priv_data, "tune", "ull", 0);
+            av_opt_set(m_codecContext->priv_data, "preset", "p7", 0); // Slowest/Best quality preset
+            av_opt_set(m_codecContext->priv_data, "tune", "hq", 0);   // High Quality tune
             av_opt_set(m_codecContext->priv_data, "delay", "0", 0);
-            av_opt_set(m_codecContext->priv_data, "zerolatency", "1", 0); // Strict zero latency
+            av_opt_set(m_codecContext->priv_data, "zerolatency", "1", 0);
             av_opt_set(m_codecContext->priv_data, "rc", "constqp", 0);
             av_opt_set_int(m_codecContext->priv_data, "qp", targetQuality, 0);
+            av_opt_set(m_codecContext->priv_data, "spatial-aq", "1", 0); // Spatial Adaptive Quantization
+            av_opt_set(m_codecContext->priv_data, "temporal-aq", "1", 0); // Temporal Adaptive Quantization
         }
         else if (gpuInfo.encoderType == EncoderType::AMD_AMF) {
-            av_opt_set(m_codecContext->priv_data, "quality", "balanced", 0);
+            av_opt_set(m_codecContext->priv_data, "quality", "quality", 0);
             av_opt_set(m_codecContext->priv_data, "rc", "cqp", 0);
             av_opt_set_int(m_codecContext->priv_data, "qp_i", targetQuality, 0);
             av_opt_set_int(m_codecContext->priv_data, "qp_p", targetQuality, 0);
         }
         else if (gpuInfo.encoderType == EncoderType::INTEL_QSV) {
-            av_opt_set(m_codecContext->priv_data, "preset", "faster", 0);
-            av_opt_set(m_codecContext->priv_data, "async_depth", "1", 0);
+            av_opt_set(m_codecContext->priv_data, "preset", "veryslow", 0); // Best quality
+            av_opt_set(m_codecContext->priv_data, "async_depth", "4", 0); // More async for performance
             av_opt_set_int(m_codecContext->priv_data, "global_quality", targetQuality, 0);
+        }
+        else if (gpuInfo.encoderType == EncoderType::SOFTWARE) {
+            av_opt_set(m_codecContext->priv_data, "preset", "ultrafast", 0); // Software must be fast
+            av_opt_set(m_codecContext->priv_data, "crf", std::to_string(targetQuality).c_str(), 0);
         }
 
         if (avcodec_open2(m_codecContext, codec, nullptr) < 0) {
