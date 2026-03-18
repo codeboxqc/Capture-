@@ -54,20 +54,6 @@ public:
                         WideCharToMultiByte(CP_UTF8, 0, name, -1, &device.name[0], size, nullptr, nullptr);
                         CoTaskMemFree(name);
                     }
-                    ComPtr<IMFMediaSource> source;
-                    if (SUCCEEDED(activateArray[i]->ActivateObject(IID_PPV_ARGS(&source)))) {
-                        ComPtr<IMFSourceReader> reader;
-                        if (SUCCEEDED(MFCreateSourceReaderFromMediaSource(source.Get(), nullptr, &reader))) {
-                            ComPtr<IMFMediaType> mediaType;
-                            if (SUCCEEDED(reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &mediaType))) {
-                                MFGetAttributeSize(mediaType.Get(), MF_MT_FRAME_SIZE, &device.width, &device.height);
-                                UINT32 fpsNum = 0, fpsDen = 1;
-                                MFGetAttributeRatio(mediaType.Get(), MF_MT_FRAME_RATE, &fpsNum, &fpsDen);
-                                device.fps = fpsDen > 0 ? fpsNum / fpsDen : 30;
-                            }
-                        }
-                        source->Shutdown();
-                    }
                     devices.push_back(device);
                     activateArray[i]->Release();
                 }
