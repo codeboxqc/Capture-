@@ -38,7 +38,6 @@ public:
         if (avformat_alloc_output_context2(&m_formatContext, nullptr, "matroska", m_outputPath.string().c_str()) < 0)
             return false;
 
-        // 1. Video Stream Configuration
         m_videoStream = avformat_new_stream(m_formatContext, nullptr);
         m_videoStream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
         m_videoStream->codecpar->codec_id = (settings.codec == Codec::H264) ? AV_CODEC_ID_H264 :
@@ -54,7 +53,6 @@ public:
             m_videoStream->codecpar->extradata_size = (int)extradata.size();
         }
 
-        // 2. Audio Stream Configuration
         if (settings.captureAudio) {
             m_audioStream = avformat_new_stream(m_formatContext, nullptr);
             m_audioStream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
@@ -67,8 +65,6 @@ public:
             m_audioStream->codecpar->block_align = 8;
             m_audioStream->time_base = { 1, 48000 };
         }
-
-        av_dict_set(&m_formatContext->metadata, "creation_time", "now", 0);
 
         if (!(m_formatContext->oformat->flags & AVFMT_NOFILE)) {
             if (avio_open(&m_formatContext->pb, m_outputPath.string().c_str(), AVIO_FLAG_WRITE) < 0) return false;
@@ -103,21 +99,21 @@ public:
                         m_startTimestamp = task.timestamp;
                         avformat_write_header(m_formatContext, nullptr);
                         m_headerWritten = true;
+                    } else if (task.isVideo) {
+                         // Wait for keyframe
+                         continue;
                     } else if (!task.isVideo && m_bytesWritten > 0) {
-                        // Allow audio to trigger header if video is late, but prefer video keyframe
-                        avformat_write_header(m_formatContext, nullptr);
-                        m_headerWritten = true;
-                    } else if (!task.isVideo && m_startTimestamp == 0) {
-                         m_startTimestamp = task.timestamp;
+                        // Already writing
+                    } else if (!task.isVideo) {
+                        // Buffer audio until first video frame
+                        continue;
                     }
-
-                    if (!m_headerWritten) continue; // Drop until header is written
+                    if (!m_headerWritten) continue;
                 }
 
                 (task.isVideo) ? WriteVideo(task) : WriteAudio(task);
             }
         });
-
         SetThreadPriority(m_writerThread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
         return true;
     }
@@ -142,11 +138,7 @@ public:
 
     void QueueAudioData(const uint8_t* data, size_t size, uint64_t timestamp) {
         if (!m_audioStream) return;
-        WriteTask task;
-        task.data.assign(data, data + size);
-        task.timestamp = timestamp;
-        task.isVideo = false;
-        task.keyframe = true;
+        WriteTask task = { std::vector<uint8_t>(data, data + size), timestamp, false, 0, true };
         QueueWriteTask(std::move(task));
     }
 
@@ -157,37 +149,31 @@ private:
         AVPacket* pkt = av_packet_alloc();
         av_new_packet(pkt, (int)task.data.size());
         memcpy(pkt->data, task.data.data(), task.data.size());
-
         pkt->stream_index = m_videoStream->index;
         int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
         pkt->pts = pkt->dts = av_rescale_q(pts_us, { 1, 1000000 }, m_videoStream->time_base);
-
         if (task.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
-
-        av_interleaved_write_frame(m_formatContext, pkt);
-        m_bytesWritten += pkt->size;
+        if (av_interleaved_write_frame(m_formatContext, pkt) >= 0) {
+            m_bytesWritten += pkt->size;
+        }
         av_packet_free(&pkt);
     }
 
     void WriteAudio(WriteTask& task) {
         if (task.timestamp < m_startTimestamp) return;
-
         AVPacket* pkt = av_packet_alloc();
         av_new_packet(pkt, (int)task.data.size());
         memcpy(pkt->data, task.data.data(), task.data.size());
-
         pkt->stream_index = m_audioStream->index;
         int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
         pkt->pts = pkt->dts = av_rescale_q(pts_us, { 1, 1000000 }, m_audioStream->time_base);
-
         int channels = m_audioStream->codecpar->ch_layout.nb_channels;
         int bitsPerSample = m_audioStream->codecpar->bits_per_coded_sample;
         int bytesPerSample = (bitsPerSample > 0) ? (bitsPerSample / 8) : 4;
-
         pkt->duration = (int)task.data.size() / (channels * bytesPerSample);
-
-        av_interleaved_write_frame(m_formatContext, pkt);
-        m_bytesWritten += pkt->size;
+        if (av_interleaved_write_frame(m_formatContext, pkt) >= 0) {
+            m_bytesWritten += pkt->size;
+        }
         av_packet_free(&pkt);
     }
 
