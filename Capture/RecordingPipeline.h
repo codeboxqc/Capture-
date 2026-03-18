@@ -211,7 +211,7 @@ private:
         }
 
         m_diskWriter = std::make_unique<DiskWriter>();
-        if (!m_diskWriter->Initialize(m_settings)) {
+        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata())) {
             spdlog::error("Failed to initialize disk writer");
             CleanupOnFailure();
             return false;
@@ -239,7 +239,7 @@ private:
         m_syncThread = std::thread(&RecordingPipeline::SyncLoop, this);
 
         if (m_usbAudioCapture) {
-            if (m_usbAudioCapture->Start(128)) { // Increased audio buffer
+            if (m_usbAudioCapture->Start(128)) {
                 m_audioThread = std::thread(&RecordingPipeline::USBAudioLoop, this);
             }
             else {
@@ -247,7 +247,7 @@ private:
             }
         }
 
-        uint32_t ringBufferSize = std::max(settings.ringBufferSize, 128u); // Maximize memory use
+        uint32_t ringBufferSize = std::max(settings.ringBufferSize, 64u);
         if (!m_usbCapture->Start(ringBufferSize)) {
             spdlog::error("Failed to start USB capture");
             CleanupOnFailure();
@@ -332,7 +332,7 @@ private:
             m_captureD3D11Context = m_sharedD3D11Context;
         }
         else {
-            spdlog::warn("Cross-Adapter Capture Detected. Enabling Dual GPU utilization.");
+            spdlog::warn("Cross-Adapter Capture Detected. Enabling Dual GPU split workload.");
             hr = D3D11CreateDevice(displayAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &m_captureD3D11Device, nullptr, &m_captureD3D11Context);
             if (FAILED(hr)) return false;
 
@@ -357,7 +357,7 @@ private:
         }
 
         m_diskWriter = std::make_unique<DiskWriter>();
-        if (!m_diskWriter->Initialize(m_settings)) {
+        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata())) {
             spdlog::error("Failed to initialize disk writer");
             CleanupOnFailure();
             return false;
@@ -400,7 +400,7 @@ private:
             m_audioThread = std::thread(&RecordingPipeline::AudioLoop, this);
         }
 
-        uint32_t ringBufferSize = std::max(settings.ringBufferSize, 256u); // Even larger for display capture
+        uint32_t ringBufferSize = std::max(settings.ringBufferSize, 64u);
         if (!m_frameCapture->StartCapture(ringBufferSize, m_settings.fps)) {
             spdlog::error("Failed to start frame capture");
             CleanupOnFailure();
@@ -439,6 +439,7 @@ private:
     }
 
     void ProcessLoop() {
+        spdlog::info("Processing thread started");
         CapturedFrame frame;
         USBFrame usbFrame;
         std::vector<EncodedPacket> encodedPackets;
@@ -456,6 +457,7 @@ private:
             }
             else {
                 gotFrame = m_frameCapture->GetNextFrame(frame, 50);
+                frame.isKeyframe = (frame.frameIndex % 60 == 0);
             }
 
             if (!gotFrame || !frame.texture) continue;
@@ -479,6 +481,7 @@ private:
                 m_frameCapture->ReturnTexture(frame.texture);
             }
         }
+        spdlog::info("Processing thread exiting");
     }
 
     void AudioLoop() {
