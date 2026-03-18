@@ -214,10 +214,9 @@ private:
             sample->Release();
 
             if (texture) {
-                // Convert Media Foundation 100-nanosecond units to Microseconds
+                // Convert Media Foundation 100ns units to microseconds
                 uint64_t timestampUs = (uint64_t)timestamp / 10;
                 USBFrame frame = { texture, timestampUs, m_frameCount++ };
-
                 std::lock_guard<std::mutex> lock(m_mutex);
                 if (m_frameQueue.size() >= m_bufferSize) {
                     ReturnTexture(m_frameQueue.front().texture);

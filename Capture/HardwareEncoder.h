@@ -166,19 +166,19 @@ private:
 
         ConfigureCommon(settings);
         if (gpuInfo.encoderType == EncoderType::NVIDIA_NVENC) {
-            av_opt_set(m_codecContext->priv_data, "preset", "p7", 0);
+            av_opt_set(m_codecContext->priv_data, "preset", "p4", 0);
             av_opt_set(m_codecContext->priv_data, "tune", "hq", 0);
             av_opt_set(m_codecContext->priv_data, "rc", "constqp", 0);
-            av_opt_set_int(m_codecContext->priv_data, "qp", 12, 0);
+            av_opt_set_int(m_codecContext->priv_data, "qp", 15, 0);
         } else if (gpuInfo.encoderType == EncoderType::AMD_AMF) {
-            av_opt_set(m_codecContext->priv_data, "quality", "quality", 0);
+            av_opt_set(m_codecContext->priv_data, "quality", "balanced", 0);
             av_opt_set(m_codecContext->priv_data, "rc", "cqp", 0);
-            av_opt_set_int(m_codecContext->priv_data, "qp_i", 12, 0);
-            av_opt_set_int(m_codecContext->priv_data, "qp_p", 12, 0);
+            av_opt_set_int(m_codecContext->priv_data, "qp_i", 15, 0);
+            av_opt_set_int(m_codecContext->priv_data, "qp_p", 15, 0);
         } else if (gpuInfo.encoderType == EncoderType::INTEL_QSV) {
-            av_opt_set(m_codecContext->priv_data, "preset", "veryslow", 0);
-            av_opt_set_int(m_codecContext->priv_data, "global_quality", 12, 0);
-            av_opt_set_int(m_codecContext->priv_data, "async_depth", 4, 0);
+            av_opt_set(m_codecContext->priv_data, "preset", "balanced", 0);
+            av_opt_set_int(m_codecContext->priv_data, "global_quality", 15, 0);
+            av_opt_set_int(m_codecContext->priv_data, "async_depth", 2, 0);
         }
 
         if (avcodec_open2(m_codecContext, codec, nullptr) < 0) return false;
@@ -199,7 +199,7 @@ private:
         ConfigureCommon(settings);
         av_opt_set(m_codecContext->priv_data, "preset", "ultrafast", 0);
         av_opt_set(m_codecContext->priv_data, "tune", "zerolatency", 0);
-        av_opt_set_int(m_codecContext->priv_data, "crf", 12, 0);
+        av_opt_set_int(m_codecContext->priv_data, "crf", 15, 0);
 
         if (avcodec_open2(m_codecContext, codec, nullptr) < 0) return false;
         m_packet = av_packet_alloc();

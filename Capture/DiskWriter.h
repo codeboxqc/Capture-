@@ -49,8 +49,10 @@ public:
 
         if (!extradata.empty()) {
             m_videoStream->codecpar->extradata = (uint8_t*)av_mallocz(extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE);
-            memcpy(m_videoStream->codecpar->extradata, extradata.data(), extradata.size());
-            m_videoStream->codecpar->extradata_size = (int)extradata.size();
+            if (m_videoStream->codecpar->extradata) {
+                memcpy(m_videoStream->codecpar->extradata, extradata.data(), extradata.size());
+                m_videoStream->codecpar->extradata_size = (int)extradata.size();
+            }
         }
 
         if (settings.captureAudio) {
@@ -66,11 +68,18 @@ public:
             m_audioStream->time_base = { 1, 48000 };
         }
 
+        av_dict_set(&m_formatContext->metadata, "creation_time", "now", 0);
+
         if (!(m_formatContext->oformat->flags & AVFMT_NOFILE)) {
             if (avio_open(&m_formatContext->pb, m_outputPath.string().c_str(), AVIO_FLAG_WRITE) < 0) return false;
         }
 
-        return true;
+        // Write header immediately to ensure file is playable and not 0 bytes
+        if (avformat_write_header(m_formatContext, nullptr) >= 0) {
+            m_headerWritten = true;
+        }
+
+        return m_headerWritten;
     }
 
     void SetAudioFormat(uint32_t sampleRate, uint16_t channels, uint16_t bitsPerSample) {
@@ -94,26 +103,14 @@ public:
                 m_taskQueue.pop();
                 lock.unlock();
 
-                if (!m_headerWritten) {
-                    if (task.isVideo && task.keyframe) {
-                        m_startTimestamp = task.timestamp;
-                        avformat_write_header(m_formatContext, nullptr);
-                        m_headerWritten = true;
-                    } else if (task.isVideo) {
-                         // Wait for keyframe
-                         continue;
-                    } else if (!task.isVideo && m_bytesWritten > 0) {
-                        // Already writing
-                    } else if (!task.isVideo) {
-                        // Buffer audio until first video frame
-                        continue;
-                    }
-                    if (!m_headerWritten) continue;
+                if (m_bytesWritten == 0 && m_startTimestamp == 0) {
+                    m_startTimestamp = task.timestamp;
                 }
 
                 (task.isVideo) ? WriteVideo(task) : WriteAudio(task);
             }
         });
+
         SetThreadPriority(m_writerThread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
         return true;
     }
@@ -122,6 +119,8 @@ public:
         m_running = false;
         m_taskAvailable.notify_all();
         if (m_writerThread.joinable()) m_writerThread.join();
+
+        std::lock_guard<std::mutex> lock(m_queueMutex);
         if (m_formatContext) {
             if (m_headerWritten) av_write_trailer(m_formatContext);
             if (m_formatContext->pb) avio_closep(&m_formatContext->pb);
@@ -146,13 +145,18 @@ public:
 
 private:
     void WriteVideo(WriteTask& task) {
+        if (!m_formatContext || !m_videoStream) return;
         AVPacket* pkt = av_packet_alloc();
+        if (!pkt) return;
+
         av_new_packet(pkt, (int)task.data.size());
         memcpy(pkt->data, task.data.data(), task.data.size());
         pkt->stream_index = m_videoStream->index;
+
         int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
         pkt->pts = pkt->dts = av_rescale_q(pts_us, { 1, 1000000 }, m_videoStream->time_base);
         if (task.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
+
         if (av_interleaved_write_frame(m_formatContext, pkt) >= 0) {
             m_bytesWritten += pkt->size;
         }
@@ -160,17 +164,22 @@ private:
     }
 
     void WriteAudio(WriteTask& task) {
-        if (task.timestamp < m_startTimestamp) return;
+        if (!m_formatContext || !m_audioStream || task.timestamp < m_startTimestamp) return;
         AVPacket* pkt = av_packet_alloc();
+        if (!pkt) return;
+
         av_new_packet(pkt, (int)task.data.size());
         memcpy(pkt->data, task.data.data(), task.data.size());
         pkt->stream_index = m_audioStream->index;
+
         int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
         pkt->pts = pkt->dts = av_rescale_q(pts_us, { 1, 1000000 }, m_audioStream->time_base);
+
         int channels = m_audioStream->codecpar->ch_layout.nb_channels;
         int bitsPerSample = m_audioStream->codecpar->bits_per_coded_sample;
         int bytesPerSample = (bitsPerSample > 0) ? (bitsPerSample / 8) : 4;
         pkt->duration = (int)task.data.size() / (channels * bytesPerSample);
+
         if (av_interleaved_write_frame(m_formatContext, pkt) >= 0) {
             m_bytesWritten += pkt->size;
         }

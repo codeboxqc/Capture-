@@ -55,12 +55,16 @@ public:
     }
 
     void StopRecording() override {
-        if (!m_recording) return;
-        m_recording = false;
+        bool expected = true;
+        if (!m_recording.compare_exchange_strong(expected, false)) return;
+
+        spdlog::info("Stopping recording...");
+
         if (m_frameCapture) m_frameCapture->StopCapture();
         if (m_usbCapture) m_usbCapture->Stop();
         if (m_usbAudioCapture) m_usbAudioCapture->Stop();
         if (m_audioCapture) m_audioCapture->StopCapture();
+
         if (m_processThread.joinable()) m_processThread.join();
         if (m_syncThread.joinable()) m_syncThread.join();
         if (m_audioThread.joinable()) m_audioThread.join();
@@ -78,7 +82,7 @@ public:
         if (m_statusCallback) m_statusCallback("Recording stopped");
     }
 
-    bool IsRecording() const override { return m_recording; }
+    bool IsRecording() const override { return m_recording.load(); }
     PerformanceMetrics GetMetrics() const override {
         PerformanceMetrics metrics = {};
         metrics.droppedFrames = m_droppedFrames;
