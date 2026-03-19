@@ -43,6 +43,7 @@ public:
         std::string codecName;
 
         if (gpuInfo.encoderType == EncoderType::NVIDIA_NVENC) {
+
             if (settings.codec == Codec::H265) {
                 codecName = "hevc_nvenc";
                 codec = avcodec_find_encoder_by_name("hevc_nvenc");
@@ -57,17 +58,42 @@ public:
             }
         }
         else if (gpuInfo.encoderType == EncoderType::AMD_AMF) {
-            if (settings.codec == Codec::H265) codec = avcodec_find_encoder_by_name("hevc_amf");
-            else codec = avcodec_find_encoder_by_name("h264_amf");
+            if (settings.codec == Codec::AV1) {
+                codecName = "av1_amf";
+                codec = avcodec_find_encoder_by_name("av1_amf");
+            }
+            if (!codec) {
+                if (settings.codec == Codec::H265) {
+                    codecName = "hevc_amf";
+                    codec = avcodec_find_encoder_by_name("hevc_amf");
+                }
+                else {
+                    codecName = "h264_amf";
+                    codec = avcodec_find_encoder_by_name("h264_amf");
+                }
+            }
         }
         else if (gpuInfo.encoderType == EncoderType::INTEL_QSV) {
-            if (settings.codec == Codec::H265) codec = avcodec_find_encoder_by_name("hevc_qsv");
-            else codec = avcodec_find_encoder_by_name("h264_qsv");
+            if (settings.codec == Codec::AV1) {
+                codecName = "av1_qsv";
+                codec = avcodec_find_encoder_by_name("av1_qsv");
+            }
+            if (!codec) {
+                if (settings.codec == Codec::H265) {
+                    codecName = "hevc_qsv";
+                    codec = avcodec_find_encoder_by_name("hevc_qsv");
+                }
+                else {
+                    codecName = "h264_qsv";
+                    codec = avcodec_find_encoder_by_name("h264_qsv");
+                }
+            }
         }
 
         if (!codec) {
             spdlog::warn("Hardware encoder '{}' not found, falling back to software", codecName);
             if (settings.codec == Codec::H265) codec = avcodec_find_encoder(AV_CODEC_ID_HEVC);
+            else if (settings.codec == Codec::AV1) codec = avcodec_find_encoder(AV_CODEC_ID_AV1);
             else codec = avcodec_find_encoder(AV_CODEC_ID_H264);
         }
 
@@ -108,8 +134,8 @@ public:
             framesCtx->sw_format = AV_PIX_FMT_BGRA;
             framesCtx->width = settings.width;
             framesCtx->height = settings.height;
-            // FIX 1: Larger pre-allocated VRAM pool to reduce allocation stuttering
-            framesCtx->initial_pool_size = 96;  // Increased from 64 to 96
+            // Stable Pool: 64 frames to ensure it fits in VRAM on RTX 2060
+            framesCtx->initial_pool_size = 64; 
 
             if (av_hwframe_ctx_init(m_hwFramesCtx) < 0) {
                 spdlog::error("Failed to initialize hardware frames context");
@@ -166,18 +192,19 @@ public:
         m_codecContext->time_base = { 1, static_cast<int>(settings.fps) };
         m_codecContext->framerate = { static_cast<int>(settings.fps), 1 };
         m_codecContext->gop_size = settings.fps * 2;
+        m_codecContext->max_b_frames = 0; 
+        m_codecContext->bit_rate = 0; 
 
-        // FIX 2: NO B-FRAMES! B-Frames force the encoder to delay packets, overflowing the buffer in real-time capture!
-        m_codecContext->max_b_frames = 0;
+        // Set flags for global headers (needed for MKV)
+        m_codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-        m_codecContext->bit_rate = 0;
-        int targetQuality = 18;
+        int targetQuality = 15; 
 
         if (gpuInfo.encoderType == EncoderType::NVIDIA_NVENC) {
-            av_opt_set(m_codecContext->priv_data, "preset", "p4", 0);
-            av_opt_set(m_codecContext->priv_data, "tune", "ull", 0);
+            av_opt_set(m_codecContext->priv_data, "preset", "p4", 0); // Balanced preset
+            av_opt_set(m_codecContext->priv_data, "tune", "hq", 0);   
             av_opt_set(m_codecContext->priv_data, "delay", "0", 0);
-            av_opt_set(m_codecContext->priv_data, "zerolatency", "1", 0); // Strict zero latency
+            av_opt_set(m_codecContext->priv_data, "zerolatency", "1", 0);
             av_opt_set(m_codecContext->priv_data, "rc", "constqp", 0);
             av_opt_set_int(m_codecContext->priv_data, "qp", targetQuality, 0);
         }
@@ -188,9 +215,13 @@ public:
             av_opt_set_int(m_codecContext->priv_data, "qp_p", targetQuality, 0);
         }
         else if (gpuInfo.encoderType == EncoderType::INTEL_QSV) {
-            av_opt_set(m_codecContext->priv_data, "preset", "faster", 0);
-            av_opt_set(m_codecContext->priv_data, "async_depth", "1", 0);
+            av_opt_set(m_codecContext->priv_data, "preset", "balanced", 0); 
+            av_opt_set(m_codecContext->priv_data, "async_depth", "2", 0);
             av_opt_set_int(m_codecContext->priv_data, "global_quality", targetQuality, 0);
+        }
+        else if (gpuInfo.encoderType == EncoderType::SOFTWARE) {
+            av_opt_set(m_codecContext->priv_data, "preset", "ultrafast", 0);
+            av_opt_set(m_codecContext->priv_data, "crf", std::to_string(targetQuality).c_str(), 0);
         }
 
         if (avcodec_open2(m_codecContext, codec, nullptr) < 0) {
@@ -300,6 +331,11 @@ public:
             outPackets.push_back(std::move(ep));
             av_packet_unref(m_packet);
         }
+    }
+
+    std::vector<uint8_t> GetExtradata() const {
+        if (!m_codecContext || !m_codecContext->extradata) return {};
+        return std::vector<uint8_t>(m_codecContext->extradata, m_codecContext->extradata + m_codecContext->extradata_size);
     }
 
 private:

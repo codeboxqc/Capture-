@@ -143,7 +143,6 @@
     <ClInclude Include="VirtualDisplayManager.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Capture.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="util.cpp" />
   </ItemGroup>

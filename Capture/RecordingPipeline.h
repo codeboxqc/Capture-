@@ -3,7 +3,7 @@
 #include "GPUDetector.h"
 #include "VirtualDisplayManager.h"
 #include "FrameCapture.h"
-#include "USBCapture.h"
+#include "usbcapture.h"
 #include "USBAudioCapture.h"
 #include "AudioCapture.h"
 #include "HardwareEncoder.h"
@@ -95,7 +95,7 @@ public:
                 task.data = std::move(packet.data);
                 task.timestamp = packet.sourceTimestamp;
                 task.isVideo = true;
-                task.pts = packet.pts;      // Now works because pts is in WriteTask
+                task.pts = packet.pts;
                 task.keyframe = packet.keyframe;
                 m_diskWriter->QueueWriteTask(std::move(task));
             }
@@ -106,9 +106,6 @@ public:
         spdlog::info("Recording stopped");
         if (m_statusCallback) m_statusCallback("Recording stopped");
     }
-
-
-
 
     bool IsRecording() const override { return m_recording; }
 
@@ -214,13 +211,12 @@ private:
         }
 
         m_diskWriter = std::make_unique<DiskWriter>();
-        if (!m_diskWriter->Initialize(m_settings)) {
+        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata())) {
             spdlog::error("Failed to initialize disk writer");
             CleanupOnFailure();
             return false;
         }
 
-        // Update audio format in DiskWriter from actual capture
         if (m_usbAudioCapture) {
             m_diskWriter->SetAudioFormat(
                 m_usbAudioCapture->GetSampleRate(),
@@ -243,7 +239,7 @@ private:
         m_syncThread = std::thread(&RecordingPipeline::SyncLoop, this);
 
         if (m_usbAudioCapture) {
-            if (m_usbAudioCapture->Start(64)) {
+            if (m_usbAudioCapture->Start(128)) {
                 m_audioThread = std::thread(&RecordingPipeline::USBAudioLoop, this);
             }
             else {
@@ -251,7 +247,7 @@ private:
             }
         }
 
-        uint32_t ringBufferSize = std::max(settings.ringBufferSize, 32u);
+        uint32_t ringBufferSize = std::max(settings.ringBufferSize, 64u);
         if (!m_usbCapture->Start(ringBufferSize)) {
             spdlog::error("Failed to start USB capture");
             CleanupOnFailure();
@@ -285,16 +281,10 @@ private:
         if (activeDisplay.width > 0 && activeDisplay.height > 0) {
             m_settings.width = activeDisplay.width;
             m_settings.height = activeDisplay.height;
-
-            // IMPORTANT: Use actual display refresh rate, not the requested FPS
-            // This prevents the 2x speed issue when display is 60Hz but recording is set to 120fps
             if (activeDisplay.refreshRate > 0) {
                 m_settings.fps = activeDisplay.refreshRate;
                 spdlog::info("Using display refresh rate: {}Hz", m_settings.fps);
             }
-
-            spdlog::info("Capturing Display {}: {}x{}@{}Hz", settings.displayIndex,
-                m_settings.width, m_settings.height, m_settings.fps);
         }
 
         if (!CreateD3D12Device(m_d3d12Device)) {
@@ -342,7 +332,7 @@ private:
             m_captureD3D11Context = m_sharedD3D11Context;
         }
         else {
-            spdlog::warn("Cross-Adapter Capture Detected. Enabling memory bridging.");
+            spdlog::warn("Cross-Adapter Capture Detected. Enabling Dual GPU split workload.");
             hr = D3D11CreateDevice(displayAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &m_captureD3D11Device, nullptr, &m_captureD3D11Context);
             if (FAILED(hr)) return false;
 
@@ -367,17 +357,15 @@ private:
         }
 
         m_diskWriter = std::make_unique<DiskWriter>();
-        if (!m_diskWriter->Initialize(m_settings)) {
+        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata())) {
             spdlog::error("Failed to initialize disk writer");
             CleanupOnFailure();
             return false;
         }
 
-        // Initialize WASAPI audio for display capture
         if (settings.captureAudio) {
             m_audioCapture = std::make_unique<AudioCapture>();
             if (m_audioCapture->Initialize(settings.audioSampleRate, settings.audioBitDepth)) {
-                // Update DiskWriter with actual audio format from WASAPI
                 m_diskWriter->SetAudioFormat(
                     m_audioCapture->GetSampleRate(),
                     m_audioCapture->GetChannels(),
@@ -450,14 +438,8 @@ private:
         catch (...) {}
     }
 
-
-
-
-
-
-    // --- Inside RecordingPipeline.h ---
-
     void ProcessLoop() {
+        spdlog::info("Processing thread started");
         CapturedFrame frame;
         USBFrame usbFrame;
         std::vector<EncodedPacket> encodedPackets;
@@ -475,6 +457,7 @@ private:
             }
             else {
                 gotFrame = m_frameCapture->GetNextFrame(frame, 50);
+                frame.isKeyframe = (frame.frameIndex % 60 == 0);
             }
 
             if (!gotFrame || !frame.texture) continue;
@@ -486,20 +469,20 @@ private:
                     task.data = std::move(packet.data);
                     task.timestamp = packet.sourceTimestamp;
                     task.isVideo = true;
-                    task.pts = packet.pts;      // Pass encoder PTS to writer task
+                    task.pts = packet.pts;
                     task.keyframe = packet.keyframe;
                     m_diskWriter->QueueWriteTask(std::move(task));
                 }
             }
 
-            if (!m_isUSBCapture && m_frameCapture) {
+            if (m_isUSBCapture) {
+                m_usbCapture->ReturnTexture(usbFrame.texture);
+            } else if (m_frameCapture) {
                 m_frameCapture->ReturnTexture(frame.texture);
             }
         }
+        spdlog::info("Processing thread exiting");
     }
-     
-
-     
 
     void AudioLoop() {
         AudioPacket packet;
@@ -518,23 +501,6 @@ private:
             }
         }
     }
-
-    
-
-
-
-
-
-
-
-
-
-
- 
-
-
-
-   
 
     void SyncLoop() {
         spdlog::info("AV sync thread started");

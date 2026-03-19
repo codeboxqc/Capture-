@@ -1,5 +1,4 @@
-﻿ 
-#include "RecordingEngine.h"
+﻿#include "RecordingEngine.h"
 #include "RecordingPipeline.h"
 #include "GPUDetector.h"
 #include "VirtualDisplayManager.h"
@@ -7,6 +6,10 @@
 #include <filesystem>
 #include <windows.h>
 #include <shellapi.h>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -32,6 +35,20 @@ std::string g_statusMessage = "Ready";
 char g_outputPath[512] = "C:\\Recordings\\capture.hevc";
 float g_ramBufferSizeGB = 4.0f;
 float g_bitrateMbps = 50.0f;
+
+// New time recording variables
+int g_recordingMode = 0; // 0 = Duration, 1 = Schedule
+int g_durationHours = 0;
+int g_durationMinutes = 2; // Default 2 minutes
+int g_durationSeconds = 0;
+int g_startHour = 7; // Default 7:00
+int g_startMinute = 0;
+int g_stopHour = 8; // Default 8:00
+int g_stopMinute = 0;
+std::chrono::system_clock::time_point g_recordingStartTime;
+std::chrono::system_clock::time_point g_scheduledStopTime;
+char g_currentTimerDisplay[64] = "00:00:00";
+bool g_scheduleActive = false;
 
 ID3D11Device* g_pd3dDevice = nullptr;
 ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
@@ -115,7 +132,7 @@ private:
     int m_selectedGPU = 0;
     int m_selectedDisplay = 0;
     int m_selectedUSBDevice = -1;
-    int m_durationMinutes = 0;   // Auto-stop limit
+    int m_durationMinutes = 0;   // Auto-stop limit (kept for backward compatibility)
 
     std::vector<DisplayInfo> m_displayList;
     std::vector<USBDeviceInfo> m_usbDeviceList;
@@ -170,11 +187,61 @@ private:
         }
     }
 
+    void UpdateTimerDisplay() {
+        if (!g_recording) {
+            strcpy_s(g_currentTimerDisplay, "00:00:00");
+            return;
+        }
+
+        auto now = std::chrono::system_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_recordingStartTime).count();
+
+        int hours = static_cast<int>(elapsed / 3600);
+        int minutes = static_cast<int>((elapsed % 3600) / 60);
+        int seconds = static_cast<int>(elapsed % 60);
+
+        snprintf(g_currentTimerDisplay, sizeof(g_currentTimerDisplay), "%02d:%02d:%02d", hours, minutes, seconds);
+    }
+
+    bool CheckScheduledTime() {
+        if (!g_scheduleActive) return true;
+
+        auto now = std::chrono::system_clock::now();
+        auto now_time_t = std::chrono::system_clock::to_time_t(now);
+        struct tm local_now;
+        localtime_s(&local_now, &now_time_t);
+
+        int currentMinutesSinceMidnight = local_now.tm_hour * 60 + local_now.tm_min;
+
+        // Check if current time is between start and stop
+        bool shouldBeRecording = (currentMinutesSinceMidnight >= (g_startHour * 60 + g_startMinute) &&
+            currentMinutesSinceMidnight < (g_stopHour * 60 + g_stopMinute));
+
+        if (shouldBeRecording && !g_recording) {
+            // Auto-start recording
+            StartRecording();
+        }
+        else if (!shouldBeRecording && g_recording) {
+            // Auto-stop recording
+            StopRecording();
+        }
+
+        return shouldBeRecording;
+    }
+
     void RenderFrame() {
         // Automatically sync UI if the backend engine auto-stopped due to the time limit
         if (g_recording && g_engine && !g_engine->IsRecording()) {
             g_recording = false;
         }
+
+        // Check for scheduled recording
+        if (g_recordingMode == 1) {
+            CheckScheduledTime();
+        }
+
+        // Update timer display
+        UpdateTimerDisplay();
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -200,6 +267,20 @@ private:
                     ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Recording Status");
                     ImGui::Text("Status: %s", g_statusMessage.c_str());
 
+                    // Live timer display
+                    ImGui::Spacing();
+                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Recording Timer:");
+                    ImGui::Text("Current Time: %s", g_currentTimerDisplay);
+
+                    // System time display
+                    auto now = std::chrono::system_clock::now();
+                    auto now_time_t = std::chrono::system_clock::to_time_t(now);
+                    struct tm local_now;
+                    localtime_s(&local_now, &now_time_t);
+                    char timeStr[9];
+                    strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &local_now);
+                    ImGui::Text("System Time: %s", timeStr);
+
                     ImGui::Spacing();
                     if (!g_recording) {
                         if (ImGui::Button("START RECORDING", ImVec2(200, 40))) { StartRecording(); }
@@ -212,9 +293,55 @@ private:
                     ImGui::Separator();
                     ImGui::Spacing();
 
-                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Time Recording Limit (Auto Stop)");
-                    ImGui::InputInt("Minutes (0 = Unlimited)", &m_durationMinutes);
-                    if (m_durationMinutes < 0) m_durationMinutes = 0;
+                    // NEW: Recording Mode Selection
+                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Recording Mode");
+                    const char* modes[] = { "Duration Based", "Schedule Based" };
+                    ImGui::Combo("Select Mode", &g_recordingMode, modes, IM_ARRAYSIZE(modes));
+
+                    if (g_recordingMode == 0) {
+                        // Duration-based recording (legacy mode)
+                        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Duration Recording");
+                        ImGui::InputInt("Hours", &g_durationHours);
+                        ImGui::InputInt("Minutes", &g_durationMinutes);
+                        ImGui::InputInt("Seconds", &g_durationSeconds);
+
+                        // Keep old variable for compatibility
+                        m_durationMinutes = g_durationHours * 60 + g_durationMinutes;
+
+                        if (g_durationHours < 0) g_durationHours = 0;
+                        if (g_durationMinutes < 0) g_durationMinutes = 0;
+                        if (g_durationMinutes > 59) g_durationMinutes = 59;
+                        if (g_durationSeconds < 0) g_durationSeconds = 0;
+                        if (g_durationSeconds > 59) g_durationSeconds = 59;
+                    }
+                    else {
+                        // Schedule-based recording
+                        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Schedule Recording");
+                        ImGui::Text("Start Time:");
+                        ImGui::InputInt("Start Hour (0-23)", &g_startHour);
+                        ImGui::InputInt("Start Minute (0-59)", &g_startMinute);
+
+                        ImGui::Spacing();
+                        ImGui::Text("Stop Time:");
+                        ImGui::InputInt("Stop Hour (0-23)", &g_stopHour);
+                        ImGui::InputInt("Stop Minute (0-59)", &g_stopMinute);
+
+                        // Validate inputs
+                        if (g_startHour < 0) g_startHour = 0;
+                        if (g_startHour > 23) g_startHour = 23;
+                        if (g_startMinute < 0) g_startMinute = 0;
+                        if (g_startMinute > 59) g_startMinute = 59;
+                        if (g_stopHour < 0) g_stopHour = 0;
+                        if (g_stopHour > 23) g_stopHour = 23;
+                        if (g_stopMinute < 0) g_stopMinute = 0;
+                        if (g_stopMinute > 59) g_stopMinute = 59;
+
+                        ImGui::Spacing();
+                        ImGui::Text("Schedule Status: %s", g_scheduleActive ? "Active" : "Inactive");
+                        if (ImGui::Button(g_scheduleActive ? "Deactivate Schedule" : "Activate Schedule")) {
+                            g_scheduleActive = !g_scheduleActive;
+                        }
+                    }
 
                     ImGui::Spacing();
                     ImGui::Separator();
@@ -395,12 +522,41 @@ private:
         g_settings.displayIndex = m_selectedDisplay;
         g_settings.usbDeviceIndex = m_selectedUSBDevice;
 
-        g_settings.recordDurationSeconds = m_durationMinutes * 60;
+        // Calculate duration based on mode
+        if (g_recordingMode == 0) {
+            // Duration mode
+            g_settings.recordDurationSeconds = (g_durationHours * 3600) + (g_durationMinutes * 60) + g_durationSeconds;
+        }
+        else {
+            // Schedule mode - calculate duration from current time to stop time
+            auto now = std::chrono::system_clock::now();
+            auto now_time_t = std::chrono::system_clock::to_time_t(now);
+            struct tm local_now;
+            localtime_s(&local_now, &now_time_t);
+
+            int currentMinutesSinceMidnight = local_now.tm_hour * 60 + local_now.tm_min;
+            int stopMinutesSinceMidnight = g_stopHour * 60 + g_stopMinute;
+            int startMinutesSinceMidnight = g_startHour * 60 + g_startMinute;
+
+            // If current time is within schedule window
+            if (currentMinutesSinceMidnight >= startMinutesSinceMidnight &&
+                currentMinutesSinceMidnight < stopMinutesSinceMidnight) {
+                int remainingMinutes = stopMinutesSinceMidnight - currentMinutesSinceMidnight;
+                g_settings.recordDurationSeconds = remainingMinutes * 60;
+            }
+            else {
+                // Not in schedule window, don't start
+                g_statusMessage = "Cannot start: Current time is outside schedule window";
+                return;
+            }
+        }
+
         g_settings.ramBufferSize = static_cast<uint64_t>(g_ramBufferSizeGB * 1024.0f * 1024.0f * 1024.0f);
         g_settings.bitrate = static_cast<uint32_t>(g_bitrateMbps * 1000000.0f);
 
         if (g_engine->StartRecording(g_settings)) {
             g_recording = true;
+            g_recordingStartTime = std::chrono::system_clock::now();
         }
     }
 
@@ -443,4 +599,4 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED); SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     RecordingApp app; int res = app.Run(hInstance, nCmdShow); CoUninitialize(); return res;
 }
- 
+
