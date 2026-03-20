@@ -77,33 +77,55 @@ public:
 
         spdlog::info("Stopping recording...");
 
-        // FIX: Set flag first to stop all loops
+        // 1. Signal threads to stop
         m_recording = false;
 
-        // FIX: Wait for threads BEFORE stopping captures
-        // This prevents accessing freed memory
-        spdlog::info("Waiting for processing thread...");
-        if (m_processThread.joinable()) m_processThread.join();
+        // 2. Wait for Processing Loop
+        spdlog::info("Shutting down processing thread...");
+        if (m_processThread.joinable()) {
+            m_processThread.join();
+            spdlog::info("Processing thread joined.");
+        }
 
-        spdlog::info("Waiting for sync thread...");
-        if (m_syncThread.joinable()) m_syncThread.join();
+        // 3. Wait for Sync Loop
+        spdlog::info("Shutting down sync thread...");
+        if (m_syncThread.joinable()) {
+            m_syncThread.join();
+            spdlog::info("Sync thread joined.");
+        }
 
-        spdlog::info("Waiting for audio thread...");
-        if (m_audioThread.joinable()) m_audioThread.join();
+        // 4. Wait for Audio Loops
+        spdlog::info("Shutting down audio threads...");
+        if (m_audioThread.joinable()) {
+            m_audioThread.join();
+            spdlog::info("Standard audio thread joined.");
+        }
+        if (m_usbAudioThread.joinable()) {
+            m_usbAudioThread.join();
+            spdlog::info("USB audio thread joined.");
+        }
 
-        // FIX: Wait for USB audio thread too
-        spdlog::info("Waiting for USB audio thread...");
-        if (m_usbAudioThread.joinable()) m_usbAudioThread.join();
+        // 5. Stop Captures
+        spdlog::info("Stopping capture engines...");
+        if (m_frameCapture) {
+            m_frameCapture->StopCapture();
+            spdlog::info("Frame capture stopped.");
+        }
+        if (m_usbCapture) {
+            m_usbCapture->Stop();
+            spdlog::info("USB video capture stopped.");
+        }
+        if (m_usbAudioCapture) {
+            m_usbAudioCapture->Stop();
+            spdlog::info("USB audio capture stopped.");
+        }
+        if (m_audioCapture) {
+            m_audioCapture->StopCapture();
+            spdlog::info("System audio capture stopped.");
+        }
 
-        // NOW stop captures (threads are already done)
-        spdlog::info("Stopping captures...");
-        if (m_frameCapture) m_frameCapture->StopCapture();
-        if (m_usbCapture) m_usbCapture->Stop();
-        if (m_usbAudioCapture) m_usbAudioCapture->Stop();
-        if (m_audioCapture) m_audioCapture->StopCapture();
-
-        // Flush Encoder to ensure final frames are saved
-        spdlog::info("Flushing encoder...");
+        // 6. Flush Encoder
+        spdlog::info("Flushing encoder buffers...");
         if (m_encoder && m_diskWriter) {
             std::vector<EncodedPacket> finalPackets;
             m_encoder->Flush(finalPackets);
@@ -116,12 +138,17 @@ public:
                 task.keyframe = packet.keyframe;
                 m_diskWriter->QueueWriteTask(std::move(task));
             }
+            spdlog::info("Encoder flushed. Frames remaining: {}", finalPackets.size());
         }
 
-        spdlog::info("Stopping disk writer...");
-        if (m_diskWriter) m_diskWriter->StopWriter();
+        // 7. Stop Disk Writer (Writes trailer and closes file)
+        spdlog::info("Closing output file...");
+        if (m_diskWriter) {
+            m_diskWriter->StopWriter();
+            spdlog::info("Disk writer stopped.");
+        }
 
-        spdlog::info("Recording stopped");
+        spdlog::info("Recording engine shutdown complete.");
         if (m_statusCallback) m_statusCallback("Recording stopped");
     }
 
@@ -199,7 +226,8 @@ private:
 
         m_settings.width = m_usbCapture->GetWidth();
         m_settings.height = m_usbCapture->GetHeight();
-        spdlog::info("USB Capture Resolution: {}x{}", m_settings.width, m_settings.height);
+        m_settings.fps = m_usbCapture->GetFPS();
+        spdlog::info("USB Capture: {}x{} @ {}fps", m_settings.width, m_settings.height, m_settings.fps);
 
         // Initialize USB Audio
         if (settings.captureAudio) {
