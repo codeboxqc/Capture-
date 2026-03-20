@@ -507,8 +507,11 @@ private:
                 }
             }
 
-            // Return texture to pool (only for display capture - USB capture doesn't have ReturnTexture)
-            if (!m_isUSBCapture && m_frameCapture) {
+            // Return texture to pool
+            if (m_isUSBCapture && m_usbCapture) {
+                m_usbCapture->ReturnTexture(frame.texture);
+            }
+            else if (!m_isUSBCapture && m_frameCapture) {
                 m_frameCapture->ReturnTexture(frame.texture);
             }
         }

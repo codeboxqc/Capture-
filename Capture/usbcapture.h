@@ -41,6 +41,7 @@ public:
         , m_bufferSize(8)
         , m_bytesPerPixel(4)
         , m_isYUY2(false)
+        , m_isNV12(false)
     {
     }
 
@@ -319,7 +320,8 @@ public:
         else if (subtype == MFVideoFormat_NV12) {
             m_bytesPerPixel = 1;  // NV12 is 12 bits per pixel (1.5 bytes)
             m_isYUY2 = false;
-            spdlog::info("Output format: NV12");
+            m_isNV12 = true;
+            spdlog::info("Output format: NV12 - will convert to BGRA");
         }
         else {
             m_bytesPerPixel = 4;  // Assume 4 for unknown
@@ -579,6 +581,65 @@ private:
         }
     }
 
+    // Convert NV12 to BGRA in-place
+    void ConvertNV12ToBGRA(const BYTE* nv12Data, BYTE* bgraData, uint32_t width, uint32_t height) {
+        // NV12: Y plane (width * height) followed by UV plane (width * height / 2)
+        // Y0 Y1 Y2 Y3 ...
+        // U0 V0 U1 V1 ...
+
+        const BYTE* yPlane = nv12Data;
+        const BYTE* uvPlane = nv12Data + (width * height);
+        const uint32_t bgraStride = width * 4;
+
+        for (uint32_t y = 0; y < height; y++) {
+            const BYTE* yRow = yPlane + (y * width);
+            const BYTE* uvRow = uvPlane + ((y / 2) * width);
+            BYTE* bgraRow = bgraData + (y * bgraStride);
+
+            for (uint32_t x = 0; x < width; x += 2) {
+                // Pixel 0
+                int Y0 = yRow[0];
+                int U = uvRow[0];
+                int V = uvRow[1];
+
+                // Pixel 1
+                int Y1 = yRow[1];
+
+                // Convert YUV to RGB (BT.601)
+                int C0 = Y0 - 16;
+                int C1 = Y1 - 16;
+                int D = U - 128;
+                int E = V - 128;
+
+                // Pixel 0
+                int R0 = (298 * C0 + 409 * E + 128) >> 8;
+                int G0 = (298 * C0 - 100 * D - 208 * E + 128) >> 8;
+                int B0 = (298 * C0 + 516 * D + 128) >> 8;
+
+                // Pixel 1
+                int R1 = (298 * C1 + 409 * E + 128) >> 8;
+                int G1 = (298 * C1 - 100 * D - 208 * E + 128) >> 8;
+                int B1 = (298 * C1 + 516 * D + 128) >> 8;
+
+                // Clamp and store as BGRA (Pixel 0)
+                bgraRow[0] = (BYTE)(B0 < 0 ? 0 : (B0 > 255 ? 255 : B0));
+                bgraRow[1] = (BYTE)(G0 < 0 ? 0 : (G0 > 255 ? 255 : G0));
+                bgraRow[2] = (BYTE)(R0 < 0 ? 0 : (R0 > 255 ? 255 : R0));
+                bgraRow[3] = 255;
+
+                // Clamp and store as BGRA (Pixel 1)
+                bgraRow[4] = (BYTE)(B1 < 0 ? 0 : (B1 > 255 ? 255 : B1));
+                bgraRow[5] = (BYTE)(G1 < 0 ? 0 : (G1 > 255 ? 255 : G1));
+                bgraRow[6] = (BYTE)(R1 < 0 ? 0 : (R1 > 255 ? 255 : R1));
+                bgraRow[7] = 255;
+
+                yRow += 2;
+                uvRow += 2;
+                bgraRow += 8;
+            }
+        }
+    }
+
     // Convert Media Foundation sample to D3D11 texture
     ComPtr<ID3D11Texture2D> ConvertToTexture(IMFSample* sample) {
         if (!sample || !m_d3d11Device) return nullptr;
@@ -649,6 +710,12 @@ private:
             ConvertYUY2ToBGRA(data, bgraBuffer.data(), m_width, m_height);
             m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, bgraBuffer.data(), m_width * 4, 0);
         }
+        else if (m_isNV12) {
+            // Convert NV12 to BGRA
+            std::vector<BYTE> bgraBuffer(m_width * m_height * 4);
+            ConvertNV12ToBGRA(data, bgraBuffer.data(), m_width, m_height);
+            m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, bgraBuffer.data(), m_width * 4, 0);
+        }
         else {
             // Direct copy for RGB32/BGRA
             m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, data, m_width * 4, 0);
@@ -680,6 +747,7 @@ private:
     uint64_t m_frameCount;
     uint32_t m_bytesPerPixel;
     bool m_isYUY2;
+    bool m_isNV12;
 
     bool m_comInitialized;
     bool m_mfInitialized;
