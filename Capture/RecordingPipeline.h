@@ -75,18 +75,35 @@ public:
     void StopRecording() override {
         if (!m_recording) return;
 
+        spdlog::info("Stopping recording...");
+
+        // FIX: Set flag first to stop all loops
         m_recording = false;
 
+        // FIX: Wait for threads BEFORE stopping captures
+        // This prevents accessing freed memory
+        spdlog::info("Waiting for processing thread...");
+        if (m_processThread.joinable()) m_processThread.join();
+
+        spdlog::info("Waiting for sync thread...");
+        if (m_syncThread.joinable()) m_syncThread.join();
+
+        spdlog::info("Waiting for audio thread...");
+        if (m_audioThread.joinable()) m_audioThread.join();
+
+        // FIX: Wait for USB audio thread too
+        spdlog::info("Waiting for USB audio thread...");
+        if (m_usbAudioThread.joinable()) m_usbAudioThread.join();
+
+        // NOW stop captures (threads are already done)
+        spdlog::info("Stopping captures...");
         if (m_frameCapture) m_frameCapture->StopCapture();
         if (m_usbCapture) m_usbCapture->Stop();
         if (m_usbAudioCapture) m_usbAudioCapture->Stop();
         if (m_audioCapture) m_audioCapture->StopCapture();
 
-        if (m_processThread.joinable()) m_processThread.join();
-        if (m_syncThread.joinable()) m_syncThread.join();
-        if (m_audioThread.joinable()) m_audioThread.join();
-
         // Flush Encoder to ensure final frames are saved
+        spdlog::info("Flushing encoder...");
         if (m_encoder && m_diskWriter) {
             std::vector<EncodedPacket> finalPackets;
             m_encoder->Flush(finalPackets);
@@ -101,6 +118,7 @@ public:
             }
         }
 
+        spdlog::info("Stopping disk writer...");
         if (m_diskWriter) m_diskWriter->StopWriter();
 
         spdlog::info("Recording stopped");
@@ -238,11 +256,13 @@ private:
 
         m_syncThread = std::thread(&RecordingPipeline::SyncLoop, this);
 
+        // FIX: Use separate m_usbAudioThread for USB audio
         if (m_usbAudioCapture) {
             if (m_usbAudioCapture->Start(128)) {
-                m_audioThread = std::thread(&RecordingPipeline::USBAudioLoop, this);
+                m_usbAudioThread = std::thread(&RecordingPipeline::USBAudioLoop, this);
             }
             else {
+                spdlog::warn("Failed to start USB audio capture");
                 m_usbAudioCapture.reset();
             }
         }
@@ -446,21 +466,33 @@ private:
 
         while (m_recording) {
             bool gotFrame = false;
+
             if (m_isUSBCapture) {
+                // FIX: Check if capture is still valid
+                if (!m_usbCapture) break;
+
                 gotFrame = m_usbCapture->GetFrame(usbFrame, 50);
-                if (gotFrame) {
+                if (gotFrame && usbFrame.texture) {
                     frame.texture = usbFrame.texture;
                     frame.timestamp = usbFrame.timestamp;
                     frame.frameIndex = usbFrame.frameIndex;
-                    frame.isKeyframe = (usbFrame.frameIndex % 60 == 0);
+                    frame.isKeyframe = (usbFrame.frameIndex % 60 == 0);  // Calculate here since USBFrame doesn't have it
                 }
             }
             else {
+                // FIX: Check if capture is still valid
+                if (!m_frameCapture) break;
+
                 gotFrame = m_frameCapture->GetNextFrame(frame, 50);
-                frame.isKeyframe = (frame.frameIndex % 60 == 0);
+                if (gotFrame) {
+                    frame.isKeyframe = (frame.frameIndex % 60 == 0);
+                }
             }
 
             if (!gotFrame || !frame.texture) continue;
+
+            // FIX: Check encoder is valid
+            if (!m_encoder || !m_diskWriter) break;
 
             encodedPackets.clear();
             if (m_encoder->EncodeFrame(frame, encodedPackets)) {
@@ -475,9 +507,8 @@ private:
                 }
             }
 
-            if (m_isUSBCapture) {
-                m_usbCapture->ReturnTexture(usbFrame.texture);
-            } else if (m_frameCapture) {
+            // Return texture to pool (only for display capture - USB capture doesn't have ReturnTexture)
+            if (!m_isUSBCapture && m_frameCapture) {
                 m_frameCapture->ReturnTexture(frame.texture);
             }
         }
@@ -485,21 +516,25 @@ private:
     }
 
     void AudioLoop() {
+        spdlog::info("Audio loop started");
         AudioPacket packet;
         while (m_recording) {
-            if (m_audioCapture && m_audioCapture->GetNextPacket(packet, 50)) {
+            if (m_audioCapture && m_diskWriter && m_audioCapture->GetNextPacket(packet, 50)) {
                 m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), packet.timestamp);
             }
         }
+        spdlog::info("Audio loop exiting");
     }
 
     void USBAudioLoop() {
+        spdlog::info("USB audio loop started");
         USBAudioPacket packet;
         while (m_recording) {
-            if (m_usbAudioCapture && m_usbAudioCapture->GetNextPacket(packet, 50)) {
+            if (m_usbAudioCapture && m_diskWriter && m_usbAudioCapture->GetNextPacket(packet, 50)) {
                 m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), packet.timestamp);
             }
         }
+        spdlog::info("USB audio loop exiting");
     }
 
     void SyncLoop() {
@@ -538,6 +573,7 @@ private:
     std::thread m_processThread;
     std::thread m_syncThread;
     std::thread m_audioThread;
+    std::thread m_usbAudioThread;  // FIX: Separate thread for USB audio
 
     std::function<void(const std::string&)> m_statusCallback;
     std::function<void(const std::string&)> m_errorCallback;

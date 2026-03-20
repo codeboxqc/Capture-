@@ -78,6 +78,143 @@ std::string WStringToString(const std::wstring& wstr) {
     return str;
 }
 
+// Modern Black & Red Theme Setup
+void SetupModernDarkRedTheme() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* colors = style.Colors;
+
+    // Main Colors - Deep Black with Red Accents
+    ImVec4 bgDark = ImVec4(0.06f, 0.06f, 0.06f, 1.00f);        // Near black background
+    ImVec4 bgMedium = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);      // Slightly lighter panels
+    ImVec4 bgLight = ImVec4(0.14f, 0.14f, 0.14f, 1.00f);       // Borders/frames
+    ImVec4 redPrimary = ImVec4(0.90f, 0.15f, 0.15f, 1.00f);    // Primary red
+    ImVec4 redHover = ImVec4(1.00f, 0.25f, 0.25f, 1.00f);      // Hover red
+    ImVec4 redActive = ImVec4(0.70f, 0.10f, 0.10f, 1.00f);     // Active/pressed red
+    ImVec4 redDark = ImVec4(0.50f, 0.08f, 0.08f, 1.00f);       // Dark red for headers
+    ImVec4 textWhite = ImVec4(0.95f, 0.95f, 0.95f, 1.00f);     // Primary text
+    ImVec4 textDim = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);       // Dimmed text
+    ImVec4 textRed = ImVec4(1.00f, 0.40f, 0.40f, 1.00f);       // Red text accent
+
+    // Backgrounds
+    colors[ImGuiCol_WindowBg] = bgDark;
+    colors[ImGuiCol_ChildBg] = bgDark;
+    colors[ImGuiCol_PopupBg] = ImVec4(0.08f, 0.08f, 0.08f, 0.98f);
+    colors[ImGuiCol_MenuBarBg] = bgMedium;
+
+    // Borders
+    colors[ImGuiCol_Border] = ImVec4(0.25f, 0.08f, 0.08f, 0.60f);
+    colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+
+    // Text
+    colors[ImGuiCol_Text] = textWhite;
+    colors[ImGuiCol_TextDisabled] = textDim;
+
+    // Headers (Tab bars, collapsing headers)
+    colors[ImGuiCol_Header] = redDark;
+    colors[ImGuiCol_HeaderHovered] = redPrimary;
+    colors[ImGuiCol_HeaderActive] = redActive;
+
+    // Buttons
+    colors[ImGuiCol_Button] = redPrimary;
+    colors[ImGuiCol_ButtonHovered] = redHover;
+    colors[ImGuiCol_ButtonActive] = redActive;
+
+    // Frame backgrounds (input fields, sliders, etc.)
+    colors[ImGuiCol_FrameBg] = bgLight;
+    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.08f, 0.08f, 1.00f);
+    colors[ImGuiCol_FrameBgActive] = ImVec4(0.25f, 0.10f, 0.10f, 1.00f);
+
+    // Tabs
+    colors[ImGuiCol_Tab] = ImVec4(0.15f, 0.05f, 0.05f, 1.00f);
+    colors[ImGuiCol_TabHovered] = redPrimary;
+    colors[ImGuiCol_TabActive] = redPrimary;
+    colors[ImGuiCol_TabUnfocused] = ImVec4(0.12f, 0.04f, 0.04f, 1.00f);
+    colors[ImGuiCol_TabUnfocusedActive] = redDark;
+
+    // Title bar
+    colors[ImGuiCol_TitleBg] = bgDark;
+    colors[ImGuiCol_TitleBgActive] = ImVec4(0.12f, 0.04f, 0.04f, 1.00f);
+    colors[ImGuiCol_TitleBgCollapsed] = bgDark;
+
+    // Scrollbar
+    colors[ImGuiCol_ScrollbarBg] = bgDark;
+    colors[ImGuiCol_ScrollbarGrab] = redDark;
+    colors[ImGuiCol_ScrollbarGrabHovered] = redPrimary;
+    colors[ImGuiCol_ScrollbarGrabActive] = redHover;
+
+    // Checkmark & Slider
+    colors[ImGuiCol_CheckMark] = redHover;
+    colors[ImGuiCol_SliderGrab] = redPrimary;
+    colors[ImGuiCol_SliderGrabActive] = redHover;
+
+    // Resize grip
+    colors[ImGuiCol_ResizeGrip] = redDark;
+    colors[ImGuiCol_ResizeGripHovered] = redPrimary;
+    colors[ImGuiCol_ResizeGripActive] = redHover;
+
+    // Separator
+    colors[ImGuiCol_Separator] = ImVec4(0.30f, 0.10f, 0.10f, 0.80f);
+    colors[ImGuiCol_SeparatorHovered] = redPrimary;
+    colors[ImGuiCol_SeparatorActive] = redHover;
+
+    // Plot lines and histograms
+    colors[ImGuiCol_PlotLines] = textRed;
+    colors[ImGuiCol_PlotLinesHovered] = redHover;
+    colors[ImGuiCol_PlotHistogram] = redPrimary;
+    colors[ImGuiCol_PlotHistogramHovered] = redHover;
+
+    // Table
+    colors[ImGuiCol_TableHeaderBg] = redDark;
+    colors[ImGuiCol_TableBorderStrong] = ImVec4(0.30f, 0.10f, 0.10f, 1.00f);
+    colors[ImGuiCol_TableBorderLight] = ImVec4(0.20f, 0.08f, 0.08f, 1.00f);
+    colors[ImGuiCol_TableRowBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    colors[ImGuiCol_TableRowBgAlt] = ImVec4(0.10f, 0.04f, 0.04f, 0.40f);
+
+    // Nav highlight
+    colors[ImGuiCol_NavHighlight] = redPrimary;
+    colors[ImGuiCol_NavWindowingHighlight] = redHover;
+    colors[ImGuiCol_NavWindowingDimBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.60f);
+
+    // Modal dim
+    colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.70f);
+
+    // Text selection
+    colors[ImGuiCol_TextSelectedBg] = ImVec4(0.50f, 0.15f, 0.15f, 0.60f);
+
+    // Drag/Drop
+    colors[ImGuiCol_DragDropTarget] = redHover;
+
+    // ============ Modern Style Settings ============
+    style.WindowRounding = 8.0f;
+    style.ChildRounding = 6.0f;
+    style.FrameRounding = 4.0f;
+    style.PopupRounding = 6.0f;
+    style.ScrollbarRounding = 4.0f;
+    style.GrabRounding = 4.0f;
+    style.TabRounding = 6.0f;
+
+    style.WindowBorderSize = 1.0f;
+    style.ChildBorderSize = 1.0f;
+    style.FrameBorderSize = 0.0f;
+    style.PopupBorderSize = 1.0f;
+    style.TabBorderSize = 0.0f;
+
+    style.WindowPadding = ImVec2(12.0f, 12.0f);
+    style.FramePadding = ImVec2(8.0f, 5.0f);
+    style.ItemSpacing = ImVec2(10.0f, 8.0f);
+    style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
+    style.IndentSpacing = 22.0f;
+    style.ScrollbarSize = 14.0f;
+    style.GrabMinSize = 12.0f;
+
+    style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
+    style.ButtonTextAlign = ImVec2(0.5f, 0.5f);
+    style.SelectableTextAlign = ImVec2(0.0f, 0.5f);
+
+    style.AntiAliasedLines = true;
+    style.AntiAliasedFill = true;
+}
+
 class RecordingApp {
 public:
     int Run(HINSTANCE hInstance, int nCmdShow) {
@@ -152,7 +289,14 @@ private:
     bool SetupImGui() {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
-        ImGui::StyleColorsDark();
+
+        // Apply modern black & red theme
+        SetupModernDarkRedTheme();
+
+        // Load a nicer font (optional - uses default if not available)
+        ImGuiIO& io = ImGui::GetIO();
+        io.Fonts->AddFontDefault();
+
         ImGui_ImplWin32_Init(m_hWnd);
         ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
         return true;
@@ -255,57 +399,114 @@ private:
 
         if (ImGui::Begin("Recording Engine Control Panel", nullptr, windowFlags)) {
 
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "GPU Recording Engine - Professional");
+            // ============ MODERN HEADER ============
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+            ImGui::SetWindowFontScale(1.3f);
+            ImGui::Text("GPU RECORDING ENGINE");
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine(ImGui::GetWindowWidth() - 120);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+            ImGui::Text("PRO EDITION");
+            ImGui::PopStyleColor();
+
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(0.5f, 0.1f, 0.1f, 0.8f));
             ImGui::Separator();
+            ImGui::PopStyleColor();
             ImGui::Spacing();
 
-            if (ImGui::BeginTabBar("MainTabs")) {
+            if (ImGui::BeginTabBar("MainTabs", ImGuiTabBarFlags_None)) {
 
                 // --- TAB 1: RECORDING CONTROLS ---
-                if (ImGui::BeginTabItem("Recording")) {
+                if (ImGui::BeginTabItem("  Recording  ")) {
                     ImGui::Spacing();
-                    ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Recording Status");
-                    ImGui::Text("Status: %s", g_statusMessage.c_str());
-
-                    // Live timer display
                     ImGui::Spacing();
-                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Recording Timer:");
-                    ImGui::Text("Current Time: %s", g_currentTimerDisplay);
 
-                    // System time display
+                    // Status Section
+                    ImGui::PushStyleColor(ImGuiCol_Text, g_recording ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f) : ImVec4(0.3f, 0.9f, 0.3f, 1.0f));
+                    ImGui::Text(g_recording ? "● RECORDING" : "● READY");
+                    ImGui::PopStyleColor();
+
+                    ImGui::SameLine();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+                    ImGui::Text("  |  %s", g_statusMessage.c_str());
+                    ImGui::PopStyleColor();
+
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    // Timer Display - Large and prominent
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                    ImGui::SetWindowFontScale(2.0f);
+                    ImGui::Text("%s", g_currentTimerDisplay);
+                    ImGui::SetWindowFontScale(1.0f);
+                    ImGui::PopStyleColor();
+
+                    // System time
                     auto now = std::chrono::system_clock::now();
                     auto now_time_t = std::chrono::system_clock::to_time_t(now);
                     struct tm local_now;
                     localtime_s(&local_now, &now_time_t);
                     char timeStr[9];
                     strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &local_now);
-                    ImGui::Text("System Time: %s", timeStr);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("System: %s", timeStr);
+                    ImGui::PopStyleColor();
 
                     ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    // Large Start/Stop Button
+                    ImVec2 buttonSize(220, 50);
                     if (!g_recording) {
-                        if (ImGui::Button("START RECORDING", ImVec2(200, 40))) { StartRecording(); }
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.65f, 0.15f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.75f, 0.20f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.55f, 0.10f, 1.0f));
+                        if (ImGui::Button("START RECORDING", buttonSize)) { StartRecording(); }
+                        ImGui::PopStyleColor(3);
                     }
                     else {
-                        if (ImGui::Button("STOP RECORDING", ImVec2(200, 40))) { StopRecording(); }
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.15f, 0.15f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.25f, 0.25f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.65f, 0.10f, 0.10f, 1.0f));
+                        if (ImGui::Button("STOP RECORDING", buttonSize)) { StopRecording(); }
+                        ImGui::PopStyleColor(3);
                     }
 
+                    ImGui::Spacing();
                     ImGui::Spacing();
                     ImGui::Separator();
                     ImGui::Spacing();
 
-                    // NEW: Recording Mode Selection
-                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Recording Mode");
+                    // Recording Mode Section
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("RECORDING MODE");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
                     const char* modes[] = { "Duration Based", "Schedule Based" };
-                    ImGui::Combo("Select Mode", &g_recordingMode, modes, IM_ARRAYSIZE(modes));
+                    ImGui::SetNextItemWidth(200);
+                    ImGui::Combo("##Mode", &g_recordingMode, modes, IM_ARRAYSIZE(modes));
+
+                    ImGui::Spacing();
 
                     if (g_recordingMode == 0) {
-                        // Duration-based recording (legacy mode)
-                        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Duration Recording");
-                        ImGui::InputInt("Hours", &g_durationHours);
-                        ImGui::InputInt("Minutes", &g_durationMinutes);
-                        ImGui::InputInt("Seconds", &g_durationSeconds);
+                        // Duration-based recording
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
+                        ImGui::Text("Set Duration:");
+                        ImGui::PopStyleColor();
 
-                        // Keep old variable for compatibility
+                        ImGui::SetNextItemWidth(80);
+                        ImGui::InputInt("Hours##dur", &g_durationHours);
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(80);
+                        ImGui::InputInt("Min##dur", &g_durationMinutes);
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(80);
+                        ImGui::InputInt("Sec##dur", &g_durationSeconds);
+
                         m_durationMinutes = g_durationHours * 60 + g_durationMinutes;
 
                         if (g_durationHours < 0) g_durationHours = 0;
@@ -316,15 +517,25 @@ private:
                     }
                     else {
                         // Schedule-based recording
-                        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Schedule Recording");
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
                         ImGui::Text("Start Time:");
-                        ImGui::InputInt("Start Hour (0-23)", &g_startHour);
-                        ImGui::InputInt("Start Minute (0-59)", &g_startMinute);
+                        ImGui::PopStyleColor();
+                        ImGui::SetNextItemWidth(80);
+                        ImGui::InputInt("Hour##start", &g_startHour);
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(80);
+                        ImGui::InputInt("Min##start", &g_startMinute);
 
                         ImGui::Spacing();
+
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
                         ImGui::Text("Stop Time:");
-                        ImGui::InputInt("Stop Hour (0-23)", &g_stopHour);
-                        ImGui::InputInt("Stop Minute (0-59)", &g_stopMinute);
+                        ImGui::PopStyleColor();
+                        ImGui::SetNextItemWidth(80);
+                        ImGui::InputInt("Hour##stop", &g_stopHour);
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(80);
+                        ImGui::InputInt("Min##stop", &g_stopMinute);
 
                         // Validate inputs
                         if (g_startHour < 0) g_startHour = 0;
@@ -337,8 +548,13 @@ private:
                         if (g_stopMinute > 59) g_stopMinute = 59;
 
                         ImGui::Spacing();
-                        ImGui::Text("Schedule Status: %s", g_scheduleActive ? "Active" : "Inactive");
-                        if (ImGui::Button(g_scheduleActive ? "Deactivate Schedule" : "Activate Schedule")) {
+
+                        ImGui::PushStyleColor(ImGuiCol_Text, g_scheduleActive ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+                        ImGui::Text("Schedule: %s", g_scheduleActive ? "ACTIVE" : "INACTIVE");
+                        ImGui::PopStyleColor();
+
+                        ImGui::SameLine();
+                        if (ImGui::Button(g_scheduleActive ? "Deactivate" : "Activate", ImVec2(100, 0))) {
                             g_scheduleActive = !g_scheduleActive;
                         }
                     }
@@ -347,47 +563,94 @@ private:
                     ImGui::Separator();
                     ImGui::Spacing();
 
-                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Output Settings");
-                    ImGui::InputText("Output Path", g_outputPath, sizeof(g_outputPath));
+                    // Output Settings
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("OUTPUT");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::InputText("##OutputPath", g_outputPath, sizeof(g_outputPath));
+
                     ImGui::EndTabItem();
                 }
 
                 // --- TAB 2: ENCODING SETTINGS ---
-                if (ImGui::BeginTabItem("Encoding")) {
+                if (ImGui::BeginTabItem("  Encoding  ")) {
+                    ImGui::Spacing();
                     ImGui::Spacing();
 
-                    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "Resolution");
-                    const char* resolutions[] = { "1920x1080", "2560x1440", "3840x2160", "7680x4320" };
-                    ImGui::Combo("Select Resolution", &m_currentResolution, resolutions, IM_ARRAYSIZE(resolutions));
+                    // Resolution
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("RESOLUTION");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                    const char* resolutions[] = { "1920x1080 (FHD)", "2560x1440 (QHD)", "3840x2160 (4K)", "7680x4320 (8K)" };
+                    ImGui::SetNextItemWidth(250);
+                    ImGui::Combo("##Resolution", &m_currentResolution, resolutions, IM_ARRAYSIZE(resolutions));
 
                     ImGui::Spacing();
-                    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "Frame Rate");
+                    ImGui::Spacing();
+
+                    // Frame Rate
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("FRAME RATE");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
                     const char* frameRates[] = { "60 FPS", "120 FPS", "144 FPS", "240 FPS" };
-                    ImGui::Combo("Select FPS", &m_currentFps, frameRates, IM_ARRAYSIZE(frameRates));
+                    ImGui::SetNextItemWidth(250);
+                    ImGui::Combo("##FPS", &m_currentFps, frameRates, IM_ARRAYSIZE(frameRates));
 
                     ImGui::Spacing();
-                    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "Codec");
-                    const char* codecs[] = { "H.264", "H.265 (HEVC)", "AV1" };
-                    ImGui::Combo("Select Codec", &m_currentCodec, codecs, IM_ARRAYSIZE(codecs));
+                    ImGui::Spacing();
+
+                    // Codec
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("CODEC");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                    const char* codecs[] = { "H.264 (AVC)", "H.265 (HEVC)", "AV1" };
+                    ImGui::SetNextItemWidth(250);
+                    ImGui::Combo("##Codec", &m_currentCodec, codecs, IM_ARRAYSIZE(codecs));
 
                     ImGui::Spacing();
-                    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "Bitrate (Mbps)");
-                    ImGui::SliderFloat("Bitrate", &g_bitrateMbps, 5.0f, 500.0f, "%.1f Mbps");
-                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(Note: Engine currently uses CQP for optimal quality, ignoring bitrate)");
+                    ImGui::Spacing();
+
+                    // Bitrate
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("BITRATE");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                    ImGui::SetNextItemWidth(300);
+                    ImGui::SliderFloat("##Bitrate", &g_bitrateMbps, 5.0f, 500.0f, "%.1f Mbps");
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
+                    ImGui::Text("(CQP mode - bitrate serves as quality guide)");
+                    ImGui::PopStyleColor();
 
                     ImGui::Spacing();
-                    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "RAM Buffer (GB)");
-                    ImGui::SliderFloat("RAM Buffer", &g_ramBufferSizeGB, 1.0f, 16.0f, "%.1f GB");
+                    ImGui::Spacing();
+
+                    // RAM Buffer
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("RAM BUFFER");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                    ImGui::SetNextItemWidth(300);
+                    ImGui::SliderFloat("##RAMBuffer", &g_ramBufferSizeGB, 1.0f, 16.0f, "%.1f GB");
 
                     ImGui::EndTabItem();
                 }
 
                 // --- TAB 3: HARDWARE SELECTION ---
-                if (ImGui::BeginTabItem("Hardware")) {
+                if (ImGui::BeginTabItem("  Hardware  ")) {
+                    ImGui::Spacing();
                     ImGui::Spacing();
 
                     // GPU Selection
-                    ImGui::TextColored(ImVec4(0.8f, 0.2f, 1.0f, 1.0f), "GPU Selection");
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("GPU SELECTION");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
                     if (ImGui::BeginListBox("##GPUs", ImVec2(-1, 100))) {
                         for (size_t i = 0; i < g_availableGPUs.size(); i++) {
                             const bool isSelected = (m_selectedGPU == (int)i);
@@ -402,7 +665,11 @@ private:
                     ImGui::Spacing();
 
                     // Display Selection
-                    ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "Display Selection");
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("DISPLAY SELECTION");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
                     if (ImGui::BeginListBox("##Displays", ImVec2(-1, 100))) {
                         for (size_t i = 0; i < m_displayNames.size(); i++) {
                             const bool isSelected = (m_selectedDisplay == (int)i);
@@ -416,7 +683,11 @@ private:
                     ImGui::Spacing();
 
                     // USB Device Selection
-                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "USB Capture Devices");
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("USB CAPTURE DEVICES");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
                     if (!m_usbDeviceNames.empty()) {
                         if (ImGui::BeginListBox("##USBDevices", ImVec2(-1, 100))) {
                             for (size_t i = 0; i < m_usbDeviceNames.size(); i++) {
@@ -425,17 +696,20 @@ private:
                             }
                             ImGui::EndListBox();
                         }
-                        if (ImGui::Button("Clear USB Selection")) { m_selectedUSBDevice = -1; }
+                        if (ImGui::Button("Clear Selection", ImVec2(120, 0))) { m_selectedUSBDevice = -1; }
                     }
                     else {
-                        ImGui::Text("No USB capture devices detected.");
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+                        ImGui::Text("No USB capture devices detected");
+                        ImGui::PopStyleColor();
                     }
 
                     ImGui::EndTabItem();
                 }
 
                 // --- TAB 4: DIAGNOSTICS ---
-                if (ImGui::BeginTabItem("Diagnostics")) {
+                if (ImGui::BeginTabItem("  Diagnostics  ")) {
+                    ImGui::Spacing();
                     ImGui::Spacing();
 
                     // System Memory
@@ -444,10 +718,19 @@ private:
                     GlobalMemoryStatusEx(&memInfo);
                     float totalSysRAM = (float)memInfo.ullTotalPhys / (1024.0f * 1024.0f * 1024.0f);
                     float availSysRAM = (float)memInfo.ullAvailPhys / (1024.0f * 1024.0f * 1024.0f);
+                    float usedPercent = (totalSysRAM - availSysRAM) / totalSysRAM;
 
-                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "System Memory:");
-                    ImGui::Text("Total RAM: %.2f GB", totalSysRAM);
-                    ImGui::Text("Available: %.2f GB", availSysRAM);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("SYSTEM MEMORY");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
+                    // Memory bar
+                    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.9f, 0.2f, 0.2f, 1.0f));
+                    ImGui::ProgressBar(usedPercent, ImVec2(300, 20), "");
+                    ImGui::PopStyleColor();
+                    ImGui::SameLine();
+                    ImGui::Text("%.1f / %.1f GB", totalSysRAM - availSysRAM, totalSysRAM);
 
                     ImGui::Spacing();
                     ImGui::Separator();
@@ -459,23 +742,66 @@ private:
                         float dedicatedVRAM = (float)gpu.dedicatedVideoMemory / (1024.0f * 1024.0f * 1024.0f);
                         float sharedVRAM = (float)gpu.sharedSystemMemory / (1024.0f * 1024.0f * 1024.0f);
 
-                        ImGui::TextColored(ImVec4(0.0f, 0.8f, 1.0f, 1.0f), "Selected GPU Capabilities:");
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                        ImGui::Text("SELECTED GPU");
+                        ImGui::PopStyleColor();
+                        ImGui::Spacing();
+
                         ImGui::Text("Name: %s", WStringToString(gpu.name).c_str());
                         ImGui::Text("Encoder: %s", GetEncoderName(gpu.encoderType));
                         ImGui::Text("Dedicated VRAM: %.2f GB", dedicatedVRAM);
-                        ImGui::Text("Shared VRAM: %.2f GB", sharedVRAM);
+                        ImGui::Text("Shared Memory: %.2f GB", sharedVRAM);
 
                         ImGui::Spacing();
-                        ImGui::Text("Hardware Decode/Encode Support:");
-                        ImGui::BulletText("H.264 - Encode: %s | Decode: %s", gpu.capabilities.supportsH264Encode ? "YES" : "NO", gpu.capabilities.supportsH264Decode ? "YES" : "NO");
-                        ImGui::BulletText("H.265 - Encode: %s | Decode: %s", gpu.capabilities.supportsH265Encode ? "YES" : "NO", gpu.capabilities.supportsH265Decode ? "YES" : "NO");
-                        ImGui::BulletText("AV1   - Encode: %s | Decode: %s", gpu.capabilities.supportsAV1Encode ? "YES" : "NO", gpu.capabilities.supportsAV1Decode ? "YES" : "NO");
+                        ImGui::Separator();
+                        ImGui::Spacing();
+
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                        ImGui::Text("CODEC SUPPORT");
+                        ImGui::PopStyleColor();
+                        ImGui::Spacing();
+
+                        // H.264
+                        ImGui::PushStyleColor(ImGuiCol_Text, gpu.capabilities.supportsH264Encode ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(0.6f, 0.3f, 0.3f, 1.0f));
+                        ImGui::Text("H.264  Enc: %s", gpu.capabilities.supportsH264Encode ? "YES" : "NO");
+                        ImGui::PopStyleColor();
+                        ImGui::SameLine(150);
+                        ImGui::PushStyleColor(ImGuiCol_Text, gpu.capabilities.supportsH264Decode ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(0.6f, 0.3f, 0.3f, 1.0f));
+                        ImGui::Text("Dec: %s", gpu.capabilities.supportsH264Decode ? "YES" : "NO");
+                        ImGui::PopStyleColor();
+
+                        // H.265
+                        ImGui::PushStyleColor(ImGuiCol_Text, gpu.capabilities.supportsH265Encode ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(0.6f, 0.3f, 0.3f, 1.0f));
+                        ImGui::Text("H.265  Enc: %s", gpu.capabilities.supportsH265Encode ? "YES" : "NO");
+                        ImGui::PopStyleColor();
+                        ImGui::SameLine(150);
+                        ImGui::PushStyleColor(ImGuiCol_Text, gpu.capabilities.supportsH265Decode ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(0.6f, 0.3f, 0.3f, 1.0f));
+                        ImGui::Text("Dec: %s", gpu.capabilities.supportsH265Decode ? "YES" : "NO");
+                        ImGui::PopStyleColor();
+
+                        // AV1
+                        ImGui::PushStyleColor(ImGuiCol_Text, gpu.capabilities.supportsAV1Encode ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(0.6f, 0.3f, 0.3f, 1.0f));
+                        ImGui::Text("AV1    Enc: %s", gpu.capabilities.supportsAV1Encode ? "YES" : "NO");
+                        ImGui::PopStyleColor();
+                        ImGui::SameLine(150);
+                        ImGui::PushStyleColor(ImGuiCol_Text, gpu.capabilities.supportsAV1Decode ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(0.6f, 0.3f, 0.3f, 1.0f));
+                        ImGui::Text("Dec: %s", gpu.capabilities.supportsAV1Decode ? "YES" : "NO");
+                        ImGui::PopStyleColor();
 
                         ImGui::Spacing();
-                        ImGui::Text("Features:");
-                        ImGui::BulletText("HDR Support: %s", gpu.capabilities.supportsHDR ? "YES" : "NO");
-                        ImGui::BulletText("Max Framerate: %u fps", gpu.capabilities.maxFramerate);
-                        ImGui::BulletText("Max Resolution: %u pixels", gpu.capabilities.maxEncodedResolution);
+                        ImGui::Separator();
+                        ImGui::Spacing();
+
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                        ImGui::Text("CAPABILITIES");
+                        ImGui::PopStyleColor();
+                        ImGui::Spacing();
+
+                        ImGui::PushStyleColor(ImGuiCol_Text, gpu.capabilities.supportsHDR ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(0.6f, 0.3f, 0.3f, 1.0f));
+                        ImGui::Text("HDR Support: %s", gpu.capabilities.supportsHDR ? "YES" : "NO");
+                        ImGui::PopStyleColor();
+                        ImGui::Text("Max Framerate: %u FPS", gpu.capabilities.maxFramerate);
+                        ImGui::Text("Max Resolution: %u px", gpu.capabilities.maxEncodedResolution);
                     }
 
                     ImGui::EndTabItem();
@@ -487,7 +813,7 @@ private:
         }
 
         ImGui::Render();
-        const float clear_color[4] = { 0.08f, 0.08f, 0.09f, 1.0f };
+        const float clear_color[4] = { 0.04f, 0.04f, 0.04f, 1.0f };
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -599,4 +925,3 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED); SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     RecordingApp app; int res = app.Run(hInstance, nCmdShow); CoUninitialize(); return res;
 }
-

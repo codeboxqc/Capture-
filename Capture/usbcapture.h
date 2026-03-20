@@ -16,6 +16,7 @@ struct USBFrame {
     ComPtr<ID3D11Texture2D> texture;
     uint64_t timestamp;
     uint32_t frameIndex;
+    bool isKeyframe;
 };
 
 // Simplified USB Capture Device Info
@@ -34,8 +35,12 @@ public:
         , m_frameCount(0)
         , m_width(0)
         , m_height(0)
+        , m_fps(30)
         , m_comInitialized(false)
         , m_mfInitialized(false)
+        , m_bufferSize(8)
+        , m_bytesPerPixel(4)
+        , m_isYUY2(false)
     {
     }
 
@@ -50,7 +55,6 @@ public:
     static std::vector<USBCaptureDevice> EnumerateDevices() {
         std::vector<USBCaptureDevice> devices;
 
-        // Initialize COM for enumeration
         HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         bool needsUninit = SUCCEEDED(hr);
 
@@ -60,7 +64,6 @@ public:
             return devices;
         }
 
-        // Create enumeration attributes
         ComPtr<IMFAttributes> attributes;
         hr = MFCreateAttributes(&attributes, 1);
         if (SUCCEEDED(hr)) {
@@ -69,7 +72,6 @@ public:
                 MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID
             );
 
-            // Enumerate
             IMFActivate** activateArray = nullptr;
             UINT32 count = 0;
             hr = MFEnumDeviceSources(attributes.Get(), &activateArray, &count);
@@ -79,7 +81,6 @@ public:
                     USBCaptureDevice device;
                     device.index = i;
 
-                    // Get friendly name
                     WCHAR* name = nullptr;
                     UINT32 nameLen = 0;
                     if (SUCCEEDED(activateArray[i]->GetAllocatedString(
@@ -91,7 +92,6 @@ public:
                         CoTaskMemFree(name);
                     }
 
-                    // Try to get resolution (this requires activating the device)
                     ComPtr<IMFMediaSource> source;
                     if (SUCCEEDED(activateArray[i]->ActivateObject(IID_PPV_ARGS(&source)))) {
                         ComPtr<IMFSourceReader> reader;
@@ -105,7 +105,6 @@ public:
                                 device.width = width;
                                 device.height = height;
 
-                                // Get framerate
                                 UINT32 fpsNum = 0, fpsDen = 1;
                                 MFGetAttributeRatio(mediaType.Get(), MF_MT_FRAME_RATE, &fpsNum, &fpsDen);
                                 device.fps = fpsDen > 0 ? fpsNum / fpsDen : 30;
@@ -137,17 +136,15 @@ public:
         m_d3d11Device = d3d11Device;
         m_d3d11Device->GetImmediateContext(&m_d3d11Context);
 
-        // Initialize COM
         HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         if (SUCCEEDED(hr)) {
             m_comInitialized = true;
         }
-        else if (hr != RPC_E_CHANGED_MODE) {
+        else if (hr != RPC_E_CHANGED_MODE && hr != S_FALSE) {
             spdlog::error("COM init failed: 0x{:08X}", static_cast<uint32_t>(hr));
             return false;
         }
 
-        // Initialize Media Foundation
         hr = MFStartup(MF_VERSION);
         if (FAILED(hr)) {
             spdlog::error("MFStartup failed: 0x{:08X}", static_cast<uint32_t>(hr));
@@ -156,7 +153,6 @@ public:
         }
         m_mfInitialized = true;
 
-        // Create attributes
         ComPtr<IMFAttributes> attributes;
         hr = MFCreateAttributes(&attributes, 1);
         if (FAILED(hr)) {
@@ -170,7 +166,6 @@ public:
             MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID
         );
 
-        // Enumerate devices
         IMFActivate** activateArray = nullptr;
         UINT32 count = 0;
         hr = MFEnumDeviceSources(attributes.Get(), &activateArray, &count);
@@ -182,7 +177,6 @@ public:
 
         spdlog::info("Found {} USB capture device(s)", count);
 
-        // Validate device index
         if (deviceIndex < 0 || deviceIndex >= (int)count) {
             spdlog::error("Invalid device index: {}", deviceIndex);
             for (UINT32 i = 0; i < count; i++) activateArray[i]->Release();
@@ -191,10 +185,8 @@ public:
             return false;
         }
 
-        // Activate selected device
         hr = activateArray[deviceIndex]->ActivateObject(IID_PPV_ARGS(&m_mediaSource));
 
-        // Log device name
         WCHAR* deviceName = nullptr;
         if (SUCCEEDED(activateArray[deviceIndex]->GetAllocatedString(
             MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &deviceName, nullptr))) {
@@ -205,7 +197,6 @@ public:
             CoTaskMemFree(deviceName);
         }
 
-        // Cleanup activate array
         for (UINT32 i = 0; i < count; i++) activateArray[i]->Release();
         CoTaskMemFree(activateArray);
 
@@ -215,11 +206,13 @@ public:
             return false;
         }
 
-        // Create source reader
+        // Create source reader with LOW LATENCY and VIDEO PROCESSING (for format conversion)
         ComPtr<IMFAttributes> readerAttrs;
-        MFCreateAttributes(&readerAttrs, 2);
-        if (readerAttrs) {
+        hr = MFCreateAttributes(&readerAttrs, 3);
+        if (SUCCEEDED(hr)) {
+            readerAttrs->SetUINT32(MF_LOW_LATENCY, TRUE);
             readerAttrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+            // Enable video processing to allow format conversion
             readerAttrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
         }
 
@@ -235,7 +228,28 @@ public:
             return false;
         }
 
-        // Configure output format (RGB32 for easy D3D11 interop)
+        // Get native format info first
+        ComPtr<IMFMediaType> nativeType;
+        hr = m_sourceReader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &nativeType);
+        if (SUCCEEDED(hr)) {
+            GUID subtype;
+            nativeType->GetGUID(MF_MT_SUBTYPE, &subtype);
+
+            if (subtype == MFVideoFormat_YUY2) {
+                spdlog::info("Native format: YUY2");
+            }
+            else if (subtype == MFVideoFormat_NV12) {
+                spdlog::info("Native format: NV12");
+            }
+            else if (subtype == MFVideoFormat_RGB32) {
+                spdlog::info("Native format: RGB32");
+            }
+            else {
+                spdlog::info("Native format: Other");
+            }
+        }
+
+        // Try to set RGB32 output format (Media Foundation will convert)
         ComPtr<IMFMediaType> mediaType;
         hr = MFCreateMediaType(&mediaType);
         if (SUCCEEDED(hr)) {
@@ -249,11 +263,21 @@ public:
             );
 
             if (FAILED(hr)) {
-                spdlog::warn("RGB32 not supported, using default format");
+                spdlog::warn("RGB32 not supported, trying NV12");
+                mediaType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+                hr = m_sourceReader->SetCurrentMediaType(
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                    nullptr,
+                    mediaType.Get()
+                );
+            }
+
+            if (FAILED(hr)) {
+                spdlog::warn("NV12 not supported, using native format (will convert manually)");
             }
         }
 
-        // Get actual format
+        // Get actual format after configuration
         ComPtr<IMFMediaType> currentType;
         hr = m_sourceReader->GetCurrentMediaType(
             MF_SOURCE_READER_FIRST_VIDEO_STREAM,
@@ -278,18 +302,53 @@ public:
         m_width = width;
         m_height = height;
 
-        spdlog::info("USB capture initialized: {}x{}", m_width, m_height);
+        // Get actual format and bytes per pixel
+        GUID subtype;
+        currentType->GetGUID(MF_MT_SUBTYPE, &subtype);
+
+        if (subtype == MFVideoFormat_RGB32 || subtype == MFVideoFormat_ARGB32) {
+            m_bytesPerPixel = 4;
+            m_isYUY2 = false;
+            spdlog::info("Output format: RGB32 (4 bytes/pixel)");
+        }
+        else if (subtype == MFVideoFormat_YUY2) {
+            m_bytesPerPixel = 2;
+            m_isYUY2 = true;
+            spdlog::info("Output format: YUY2 (2 bytes/pixel) - will convert to BGRA");
+        }
+        else if (subtype == MFVideoFormat_NV12) {
+            m_bytesPerPixel = 1;  // NV12 is 12 bits per pixel (1.5 bytes)
+            m_isYUY2 = false;
+            spdlog::info("Output format: NV12");
+        }
+        else {
+            m_bytesPerPixel = 4;  // Assume 4 for unknown
+            m_isYUY2 = false;
+            spdlog::warn("Unknown output format, assuming 4 bytes/pixel");
+        }
+
+        // Get FPS
+        UINT32 fpsNum = 0, fpsDen = 1;
+        if (SUCCEEDED(MFGetAttributeRatio(currentType.Get(), MF_MT_FRAME_RATE, &fpsNum, &fpsDen))) {
+            m_fps = fpsDen > 0 ? fpsNum / fpsDen : 30;
+        }
+
+        spdlog::info("USB capture initialized: {}x{} @ {}fps", m_width, m_height, m_fps);
         return true;
     }
 
     // Start capturing frames
-    bool Start(uint32_t bufferSize = 16) {
+    bool Start(uint32_t bufferSize = 8) {
         if (!m_sourceReader) {
             spdlog::error("Not initialized");
             return false;
         }
 
+        // Flush any old buffered frames before starting
+        m_sourceReader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+
         m_bufferSize = bufferSize;
+        m_frameCount = 0;
         m_running = true;
         m_captureThread = std::thread(&SimpleUSBCapture::CaptureThreadFunc, this);
 
@@ -301,23 +360,29 @@ public:
         if (!m_running) return;
 
         m_running = false;
+
+        // 1. Wake up the GetFrame() waiter
         m_frameAvailable.notify_all();
 
+        // 2. CRITICAL for Magewell: Flush the hardware reader.
+        // This cancels the pending ReadSample() in the capture thread.
+        if (m_sourceReader) {
+            m_sourceReader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+        }
+
+        // 3. Join the thread
         if (m_captureThread.joinable()) {
             m_captureThread.join();
         }
 
-        // Clear buffer
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            while (!m_frameQueue.empty()) m_frameQueue.pop();
-        }
-        
-        // Clear texture pool
-        {
-            std::lock_guard<std::mutex> lock(m_poolMutex);
-            while (!m_texturePool.empty()) m_texturePool.pop();
-        }
+        // 4. Clear buffers
+        std::lock_guard<std::mutex> lock(m_mutex);
+        while (!m_frameQueue.empty()) m_frameQueue.pop();
+
+        std::lock_guard<std::mutex> poolLock(m_poolMutex);
+        while (!m_texturePool.empty()) m_texturePool.pop();
+
+        spdlog::info("USB Capture stopped successfully.");
     }
 
     // Get next captured frame (blocking with timeout)
@@ -341,17 +406,21 @@ public:
         return true;
     }
 
-    // Return texture to pool for reuse (Fixes memory leak)
+    // Return texture to pool for reuse
     void ReturnTexture(ComPtr<ID3D11Texture2D> texture) {
         if (!texture) return;
         std::lock_guard<std::mutex> lock(m_poolMutex);
-        m_texturePool.push(texture);
+        if (m_texturePool.size() < 32) {
+            m_texturePool.push(texture);
+        }
     }
 
     // Get current resolution
     uint32_t GetWidth() const { return m_width; }
     uint32_t GetHeight() const { return m_height; }
+    uint32_t GetFPS() const { return m_fps; }
     bool IsRunning() const { return m_running; }
+    uint64_t GetFrameCount() const { return m_frameCount; }
 
 private:
     // Cleanup all resources
@@ -430,19 +499,26 @@ private:
                 USBFrame frame;
                 frame.texture = texture;
                 frame.timestamp = GetCurrentTimestamp();
-                frame.frameIndex = m_frameCount++;
+                frame.frameIndex = static_cast<uint32_t>(m_frameCount++);
+                frame.isKeyframe = (frame.frameIndex % (m_fps * 2) == 0);
 
-                // Add to queue
+                // DEADLOCK FIX - save texture to return OUTSIDE the lock
+                ComPtr<ID3D11Texture2D> textureToReturn = nullptr;
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
 
                     // Drop oldest if full
                     if (m_frameQueue.size() >= m_bufferSize) {
-                        ReturnTexture(m_frameQueue.front().texture);
+                        textureToReturn = m_frameQueue.front().texture;
                         m_frameQueue.pop();
                     }
 
                     m_frameQueue.push(frame);
+                }
+
+                // Return texture OUTSIDE the lock to avoid deadlock
+                if (textureToReturn) {
+                    ReturnTexture(textureToReturn);
                 }
 
                 m_frameAvailable.notify_one();
@@ -450,6 +526,57 @@ private:
         }
 
         spdlog::info("USB capture thread stopped");
+    }
+
+    // Convert YUY2 to BGRA in-place
+    void ConvertYUY2ToBGRA(const BYTE* yuy2Data, BYTE* bgraData, uint32_t width, uint32_t height) {
+        // YUY2: Y0 U0 Y1 V0 (4 bytes = 2 pixels)
+        // BGRA: B G R A (4 bytes = 1 pixel)
+
+        const uint32_t yuy2Stride = width * 2;
+        const uint32_t bgraStride = width * 4;
+
+        for (uint32_t y = 0; y < height; y++) {
+            const BYTE* yuy2Row = yuy2Data + y * yuy2Stride;
+            BYTE* bgraRow = bgraData + y * bgraStride;
+
+            for (uint32_t x = 0; x < width; x += 2) {
+                int Y0 = yuy2Row[0];
+                int U = yuy2Row[1];
+                int Y1 = yuy2Row[2];
+                int V = yuy2Row[3];
+                yuy2Row += 4;
+
+                // Convert YUV to RGB (BT.601)
+                int C0 = Y0 - 16;
+                int C1 = Y1 - 16;
+                int D = U - 128;
+                int E = V - 128;
+
+                // Pixel 0
+                int R0 = (298 * C0 + 409 * E + 128) >> 8;
+                int G0 = (298 * C0 - 100 * D - 208 * E + 128) >> 8;
+                int B0 = (298 * C0 + 516 * D + 128) >> 8;
+
+                // Pixel 1
+                int R1 = (298 * C1 + 409 * E + 128) >> 8;
+                int G1 = (298 * C1 - 100 * D - 208 * E + 128) >> 8;
+                int B1 = (298 * C1 + 516 * D + 128) >> 8;
+
+                // Clamp and store as BGRA
+                bgraRow[0] = (BYTE)(B0 < 0 ? 0 : (B0 > 255 ? 255 : B0));
+                bgraRow[1] = (BYTE)(G0 < 0 ? 0 : (G0 > 255 ? 255 : G0));
+                bgraRow[2] = (BYTE)(R0 < 0 ? 0 : (R0 > 255 ? 255 : R0));
+                bgraRow[3] = 255;
+
+                bgraRow[4] = (BYTE)(B1 < 0 ? 0 : (B1 > 255 ? 255 : B1));
+                bgraRow[5] = (BYTE)(G1 < 0 ? 0 : (G1 > 255 ? 255 : G1));
+                bgraRow[6] = (BYTE)(R1 < 0 ? 0 : (R1 > 255 ? 255 : R1));
+                bgraRow[7] = 255;
+
+                bgraRow += 8;
+            }
+        }
     }
 
     // Convert Media Foundation sample to D3D11 texture
@@ -467,22 +594,27 @@ private:
         hr = buffer->Lock(&data, nullptr, &length);
         if (FAILED(hr) || !data) return nullptr;
 
-        // Validate size (RGB32 = 4 bytes per pixel)
-        DWORD expectedSize = m_width * m_height * 4;
+        // Calculate expected size based on actual format
+        DWORD expectedSize = m_width * m_height * m_bytesPerPixel;
+        if (m_bytesPerPixel == 1) {
+            // NV12: width * height * 1.5
+            expectedSize = m_width * m_height * 3 / 2;
+        }
+
         if (length < expectedSize) {
-            spdlog::warn("Buffer size mismatch: {} < {}", length, expectedSize);
+            spdlog::warn("Buffer size mismatch: {} < {} (format bpp={})", length, expectedSize, m_bytesPerPixel);
             buffer->Unlock();
             return nullptr;
         }
 
-        // Get or Create D3D11 texture
+        // Get or create D3D11 texture (always BGRA for D3D11)
         ComPtr<ID3D11Texture2D> texture;
         {
             std::lock_guard<std::mutex> lock(m_poolMutex);
             if (!m_texturePool.empty()) {
                 texture = m_texturePool.front();
                 m_texturePool.pop();
-                
+
                 D3D11_TEXTURE2D_DESC desc;
                 texture->GetDesc(&desc);
                 if (desc.Width != m_width || desc.Height != m_height || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
@@ -501,17 +633,27 @@ private:
             desc.SampleDesc.Count = 1;
             desc.Usage = D3D11_USAGE_DEFAULT;
             desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            
+
             hr = m_d3d11Device->CreateTexture2D(&desc, nullptr, &texture);
             if (FAILED(hr)) {
+                spdlog::error("CreateTexture2D failed: 0x{:08X}", static_cast<uint32_t>(hr));
                 buffer->Unlock();
                 return nullptr;
             }
         }
 
-        // Update texture data
-        m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, data, m_width * 4, 0);
-        
+        // Convert and upload to texture
+        if (m_isYUY2) {
+            // Convert YUY2 to BGRA
+            std::vector<BYTE> bgraBuffer(m_width * m_height * 4);
+            ConvertYUY2ToBGRA(data, bgraBuffer.data(), m_width, m_height);
+            m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, bgraBuffer.data(), m_width * 4, 0);
+        }
+        else {
+            // Direct copy for RGB32/BGRA
+            m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, data, m_width * 4, 0);
+        }
+
         buffer->Unlock();
         return texture;
     }
@@ -533,8 +675,11 @@ private:
 
     uint32_t m_width;
     uint32_t m_height;
+    uint32_t m_fps;
     uint32_t m_bufferSize;
     uint64_t m_frameCount;
+    uint32_t m_bytesPerPixel;
+    bool m_isYUY2;
 
     bool m_comInitialized;
     bool m_mfInitialized;
@@ -543,7 +688,7 @@ private:
     std::mutex m_mutex;
     std::condition_variable m_frameAvailable;
 
-    // Texture Pool (Fixes memory leak)
+    // Texture Pool
     std::queue<ComPtr<ID3D11Texture2D>> m_texturePool;
     std::mutex m_poolMutex;
 };

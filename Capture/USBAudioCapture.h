@@ -34,9 +34,13 @@ public:
         : m_running(false)
         , m_sampleRate(48000)
         , m_channels(2)
-        , m_bitsPerSample(16)
+        , m_bitsPerSample(32)
         , m_comInitialized(false)
         , m_mfInitialized(false)
+        , m_bufferSize(64)
+        , m_packetsProcessed(0)
+        , m_baseTimestamp(0)
+        , m_lastDeviceTimestamp(0)
     {
     }
 
@@ -45,7 +49,7 @@ public:
         Shutdown();
     }
 
-    // Enumerate all USB audio capture devices (inputs)
+    // Enumerate all USB audio capture devices
     static std::vector<USBAudioDeviceInfo> EnumerateAudioDevices() {
         std::vector<USBAudioDeviceInfo> devices;
 
@@ -66,7 +70,6 @@ public:
             return devices;
         }
 
-        // Get audio capture devices (microphones, line-in, USB audio inputs)
         hr = pAttributes->SetGUID(
             MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
             MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_AUDCAP_GUID
@@ -82,7 +85,6 @@ public:
                 info.index = i;
                 info.isCapture = true;
 
-                // Get friendly name
                 WCHAR* friendlyName = nullptr;
                 UINT32 nameLen = 0;
                 hr = ppDevices[i]->GetAllocatedString(
@@ -100,7 +102,6 @@ public:
                     CoTaskMemFree(friendlyName);
                 }
 
-                // Get symbolic link (device path)
                 WCHAR* symbolicLink = nullptr;
                 UINT32 linkLen = 0;
                 hr = ppDevices[i]->GetAllocatedString(
@@ -135,17 +136,12 @@ public:
     }
 
     // Find matching audio device for a video capture device
-    // Magewell cards typically have matching names like:
-    //   Video: "USB3.0 Capture"
-    //   Audio: "USB3.0 Capture Audio" or "Digital Audio Interface (USB3.0 Capture)"
     static int FindMatchingAudioDevice(const std::string& videoDeviceName) {
         auto audioDevices = EnumerateAudioDevices();
 
-        // Extract base name from video device (remove suffixes)
         std::string videoNameLower = videoDeviceName;
         std::transform(videoNameLower.begin(), videoNameLower.end(), videoNameLower.begin(), ::tolower);
 
-        // Remove common suffixes for matching
         std::vector<std::string> suffixesToRemove = { " video", " [capture card]", " [webcam]", " [video capture]" };
         for (const auto& suffix : suffixesToRemove) {
             size_t pos = videoNameLower.find(suffix);
@@ -154,49 +150,44 @@ public:
             }
         }
 
-        spdlog::info("Looking for audio device matching video device base name: '{}'", videoNameLower);
+        spdlog::info("Looking for audio device matching: '{}'", videoNameLower);
 
-        // First pass: look for exact match with "audio" suffix
         for (const auto& audioDevice : audioDevices) {
             std::string audioNameLower = audioDevice.name;
             std::transform(audioNameLower.begin(), audioNameLower.end(), audioNameLower.begin(), ::tolower);
 
-            // Check for "USB3.0 Capture Audio" pattern
             if (audioNameLower.find(videoNameLower) != std::string::npos &&
                 audioNameLower.find("audio") != std::string::npos) {
-                spdlog::info("Found matching audio device (exact match): '{}' (index {})", audioDevice.name, audioDevice.index);
+                spdlog::info("Found matching audio device: '{}' (index {})", audioDevice.name, audioDevice.index);
                 return audioDevice.index;
             }
         }
 
-        // Second pass: look for any device containing the base name
         for (const auto& audioDevice : audioDevices) {
             std::string audioNameLower = audioDevice.name;
             std::transform(audioNameLower.begin(), audioNameLower.end(), audioNameLower.begin(), ::tolower);
 
             if (audioNameLower.find(videoNameLower) != std::string::npos) {
-                spdlog::info("Found matching audio device (partial match): '{}' (index {})", audioDevice.name, audioDevice.index);
+                spdlog::info("Found matching audio device: '{}' (index {})", audioDevice.name, audioDevice.index);
                 return audioDevice.index;
             }
 
-            // Check for "Digital Audio Interface (DeviceName)" pattern
             size_t parenStart = audioNameLower.find('(');
             size_t parenEnd = audioNameLower.find(')');
             if (parenStart != std::string::npos && parenEnd != std::string::npos && parenEnd > parenStart) {
                 std::string inParens = audioNameLower.substr(parenStart + 1, parenEnd - parenStart - 1);
                 if (inParens.find(videoNameLower) != std::string::npos ||
                     videoNameLower.find(inParens) != std::string::npos) {
-                    spdlog::info("Found matching audio device (parentheses match): '{}' (index {})", audioDevice.name, audioDevice.index);
+                    spdlog::info("Found matching audio device: '{}' (index {})", audioDevice.name, audioDevice.index);
                     return audioDevice.index;
                 }
             }
         }
 
-        spdlog::warn("No matching audio device found for video device: {}", videoDeviceName);
+        spdlog::warn("No matching audio device found for: {}", videoDeviceName);
         return -1;
     }
 
-    // Initialize with device index
     bool Initialize(int deviceIndex) {
         spdlog::info("Initializing USB audio capture for device index {}", deviceIndex);
 
@@ -210,7 +201,6 @@ public:
         }
         m_mfInitialized = true;
 
-        // Get audio capture devices
         ComPtr<IMFAttributes> pAttributes;
         hr = MFCreateAttributes(&pAttributes, 1);
         if (FAILED(hr)) {
@@ -242,7 +232,6 @@ public:
             return false;
         }
 
-        // Get device name for logging
         WCHAR* friendlyName = nullptr;
         UINT32 nameLen = 0;
         if (SUCCEEDED(ppDevices[deviceIndex]->GetAllocatedString(
@@ -256,10 +245,7 @@ public:
             CoTaskMemFree(friendlyName);
         }
 
-        // Activate the selected device
-        hr = ppDevices[deviceIndex]->ActivateObject(
-            IID_PPV_ARGS(&m_mediaSource)
-        );
+        hr = ppDevices[deviceIndex]->ActivateObject(IID_PPV_ARGS(&m_mediaSource));
 
         for (UINT32 i = 0; i < count; i++) ppDevices[i]->Release();
         CoTaskMemFree(ppDevices);
@@ -270,9 +256,12 @@ public:
             return false;
         }
 
-        // Create source reader
+        // FIX: Create source reader with LOW LATENCY attributes
         ComPtr<IMFAttributes> readerAttrs;
-        MFCreateAttributes(&readerAttrs, 1);
+        hr = MFCreateAttributes(&readerAttrs, 2);
+        if (SUCCEEDED(hr)) {
+            readerAttrs->SetUINT32(MF_LOW_LATENCY, TRUE);
+        }
 
         hr = MFCreateSourceReaderFromMediaSource(
             m_mediaSource.Get(),
@@ -286,39 +275,25 @@ public:
             return false;
         }
 
-
-
-
-
-         
-
-
-        // Configure output format (PCM 48kHz 16-bit stereo)
+        // Configure output format (Float 48kHz 32-bit stereo)
         ComPtr<IMFMediaType> mediaType;
         hr = MFCreateMediaType(&mediaType);
         if (SUCCEEDED(hr)) {
             mediaType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-            
-
             mediaType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
             mediaType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 32);
             mediaType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
             mediaType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
 
             hr = m_sourceReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, mediaType.Get());
-           
-
             if (FAILED(hr)) {
-                spdlog::warn("PCM 48kHz/16bit/stereo not supported, trying default format");
+                spdlog::warn("Float format not supported, using default");
             }
         }
 
         // Get actual format
         ComPtr<IMFMediaType> currentType;
-        hr = m_sourceReader->GetCurrentMediaType(
-            MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-            &currentType
-        );
+        hr = m_sourceReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &currentType);
 
         if (FAILED(hr)) {
             spdlog::error("Failed to get audio media type");
@@ -326,7 +301,6 @@ public:
             return false;
         }
 
-        // Extract format info
         UINT32 sampleRate = 0, channels = 0, bitsPerSample = 0;
         currentType->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &sampleRate);
         currentType->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels);
@@ -334,9 +308,9 @@ public:
 
         m_sampleRate = sampleRate > 0 ? sampleRate : 48000;
         m_channels = channels > 0 ? (uint16_t)channels : 2;
-        m_bitsPerSample = bitsPerSample > 0 ? (uint16_t)bitsPerSample : 16;
+        m_bitsPerSample = bitsPerSample > 0 ? (uint16_t)bitsPerSample : 32;
 
-        spdlog::info("USB audio initialized: {}Hz, {} channels, {} bits", m_sampleRate, m_channels, m_bitsPerSample);
+        spdlog::info("USB audio initialized (LOW LATENCY): {}Hz, {} ch, {} bit", m_sampleRate, m_channels, m_bitsPerSample);
         return true;
     }
 
@@ -347,8 +321,13 @@ public:
         }
 
         m_bufferSize = bufferSize;
+        m_packetsProcessed = 0;
+        m_baseTimestamp = 0;
+        m_lastDeviceTimestamp = 0;
+
         m_running = true;
         m_captureThread = std::thread(&USBAudioCapture::CaptureThreadFunc, this);
+        SetThreadPriority(m_captureThread.native_handle(), THREAD_PRIORITY_TIME_CRITICAL);
 
         return true;
     }
@@ -363,8 +342,14 @@ public:
             m_captureThread.join();
         }
 
+        if (m_sourceReader) {
+            m_sourceReader->Flush(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
+        }
+
         std::lock_guard<std::mutex> lock(m_mutex);
         while (!m_packetQueue.empty()) m_packetQueue.pop();
+
+        spdlog::info("USB audio stopped. Packets: {}", m_packetsProcessed.load());
     }
 
     bool GetNextPacket(USBAudioPacket& packet, uint32_t timeoutMs = 100) {
@@ -391,6 +376,7 @@ public:
     uint16_t GetChannels() const { return m_channels; }
     uint16_t GetBitDepth() const { return m_bitsPerSample; }
     bool IsRunning() const { return m_running; }
+    uint64_t GetPacketsProcessed() const { return m_packetsProcessed.load(); }
 
 private:
     void Shutdown() {
@@ -416,25 +402,25 @@ private:
     }
 
     void CaptureThreadFunc() {
-        spdlog::info("USB audio capture thread started ({}Hz, {} ch, {} bit)", m_sampleRate, m_channels, m_bitsPerSample);
+        spdlog::info("USB audio capture thread started (LOW LATENCY)");
 
         while (m_running) {
             IMFSample* sample = nullptr;
             DWORD streamFlags = 0;
-            LONGLONG timestamp = 0;
+            LONGLONG deviceTimestamp = 0;
 
             HRESULT hr = m_sourceReader->ReadSample(
                 MF_SOURCE_READER_FIRST_AUDIO_STREAM,
                 0,
                 nullptr,
                 &streamFlags,
-                &timestamp,
+                &deviceTimestamp,
                 &sample
             );
 
             if (FAILED(hr)) {
                 spdlog::warn("Audio ReadSample failed: 0x{:08X}", static_cast<uint32_t>(hr));
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
 
@@ -450,7 +436,19 @@ private:
 
             if (!sample) continue;
 
-            // Get buffer
+            // FIX: Track timestamps to detect stale audio
+            if (m_baseTimestamp == 0) {
+                m_baseTimestamp = deviceTimestamp;
+            }
+
+            // Skip old audio packets (timestamp went backwards)
+            if (deviceTimestamp < m_lastDeviceTimestamp && m_lastDeviceTimestamp > 0) {
+                spdlog::debug("Skipping old audio packet");
+                sample->Release();
+                continue;
+            }
+            m_lastDeviceTimestamp = deviceTimestamp;
+
             ComPtr<IMFMediaBuffer> buffer;
             hr = sample->ConvertToContiguousBuffer(&buffer);
             if (FAILED(hr)) {
@@ -466,7 +464,6 @@ private:
                 continue;
             }
 
-            // Create packet
             USBAudioPacket packet;
             packet.data.assign(data, data + length);
             packet.timestamp = GetCurrentTimestamp();
@@ -477,18 +474,18 @@ private:
             buffer->Unlock();
             sample->Release();
 
-            // Add to queue
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
 
                 if (m_packetQueue.size() >= m_bufferSize) {
-                    m_packetQueue.pop();  // Drop oldest
+                    m_packetQueue.pop();
                 }
 
                 m_packetQueue.push(std::move(packet));
             }
 
             m_packetAvailable.notify_one();
+            m_packetsProcessed++;
         }
 
         spdlog::info("USB audio capture thread stopped");
@@ -513,6 +510,11 @@ private:
 
     bool m_comInitialized;
     bool m_mfInitialized;
+
+    // FIX: Timestamp tracking
+    LONGLONG m_baseTimestamp;
+    LONGLONG m_lastDeviceTimestamp;
+    std::atomic<uint64_t> m_packetsProcessed;
 
     std::queue<USBAudioPacket> m_packetQueue;
     std::mutex m_mutex;

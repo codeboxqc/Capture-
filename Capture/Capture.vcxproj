@@ -127,7 +127,6 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="AudioCapture.h" />
-    <ClInclude Include="Capture.h" />
     <ClInclude Include="DiskWriter.h" />
     <ClInclude Include="FrameCapture.h" />
     <ClInclude Include="framework.h" />
