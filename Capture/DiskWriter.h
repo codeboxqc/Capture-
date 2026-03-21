@@ -137,8 +137,19 @@ public:
                 lock.unlock();
 
                 if (!m_headerWritten) {
-                    if (task.isVideo && task.keyframe) {
+                    // Set start timestamp based on the very first packet we see (audio or video)
+                    if (m_startTimestamp == 0) {
                         m_startTimestamp = task.timestamp;
+                        spdlog::info("Recording start timestamp anchored to {} ({} packet)",
+                            m_startTimestamp, task.isVideo ? "video" : "audio");
+                    }
+
+                    // Write header as soon as we can.
+                    // Ideally we wait for a video keyframe for seekability, but we must not wait too long
+                    // or we lose initial audio.
+                    bool shouldWriteHeader = (task.isVideo && task.keyframe) || (!task.isVideo);
+
+                    if (shouldWriteHeader) {
                         int ret = avformat_write_header(m_formatContext, nullptr);
                         if (ret < 0) {
                             char errBuf[AV_ERROR_MAX_STRING_SIZE];
@@ -147,16 +158,7 @@ public:
                             continue;
                         }
                         m_headerWritten = true;
-                        spdlog::info("MKV header written, recording started");
-                    } else if (!task.isVideo && m_bytesWritten > 0) {
-                        // Allow audio to trigger header if video is late, but prefer video keyframe
-                        int ret = avformat_write_header(m_formatContext, nullptr);
-                        if (ret >= 0) {
-                            m_headerWritten = true;
-                            spdlog::info("MKV header written (audio triggered)");
-                        }
-                    } else if (!task.isVideo && m_startTimestamp == 0) {
-                         m_startTimestamp = task.timestamp;
+                        spdlog::info("MKV header written, recording started ({} triggered)", task.isVideo ? "video" : "audio");
                     }
                     
                     if (!m_headerWritten) continue; // Drop until header is written

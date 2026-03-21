@@ -466,7 +466,13 @@ private:
 
             USBAudioPacket packet;
             packet.data.assign(data, data + length);
-            packet.timestamp = GetCurrentTimestamp();
+
+            // Use high-precision QPC timestamp
+            LARGE_INTEGER qpcFreq, qpcNow;
+            QueryPerformanceFrequency(&qpcFreq);
+            QueryPerformanceCounter(&qpcNow);
+            packet.timestamp = (qpcNow.QuadPart * 1000000) / qpcFreq.QuadPart;
+
             packet.sampleRate = m_sampleRate;
             packet.channels = m_channels;
             packet.bitsPerSample = m_bitsPerSample;

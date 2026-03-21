@@ -118,69 +118,84 @@ public:
 
         m_useSystemMemory = (gpuInfo.encoderType == EncoderType::INTEL_QSV || gpuInfo.encoderType == EncoderType::SOFTWARE);
 
+        bool tryingSaferDefaults = false;
+
     retry_init:
-        // Determine pixel format BEFORE context initialization to avoid mismatch
+        m_codecContext->width = settings.width;
+        m_codecContext->height = settings.height;
+        m_codecContext->time_base = { 1, static_cast<int>(settings.fps) };
+        m_codecContext->framerate = { static_cast<int>(settings.fps), 1 };
+        m_codecContext->gop_size = static_cast<int>(settings.fps * 2);
+        m_codecContext->max_b_frames = 0;
+        m_codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        m_keyframeInterval = m_codecContext->gop_size;
+
         if (m_useSystemMemory) {
             m_codecContext->pix_fmt = AV_PIX_FMT_YUV444P;
-        }
-        else if (gpuInfo.encoderType == EncoderType::NVIDIA_NVENC) {
-            m_codecContext->pix_fmt = AV_PIX_FMT_D3D11;
-        }
-        else {
-            m_codecContext->pix_fmt = AV_PIX_FMT_NV12;
-        }
-
-        if (!m_useSystemMemory) {
-            if (!InitializeHardwareContext(settings, gpuInfo.encoderType)) {
-                spdlog::warn("Hardware context init failed, falling back to software");
-                m_useSystemMemory = true;
-
-                // Reset context for software fallback
-                avcodec_free_context(&m_codecContext);
-                if (settings.codec == Codec::H265) codec = avcodec_find_encoder(AV_CODEC_ID_HEVC);
-                else if (settings.codec == Codec::AV1) codec = avcodec_find_encoder(AV_CODEC_ID_AV1);
-                else codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-
-                if (!codec) return false;
-                m_codecContext = avcodec_alloc_context3(codec);
-                goto retry_init;
-            }
-        }
-        else {
             if (!InitializeSystemMemoryContext(settings, gpuInfo)) {
                 spdlog::error("Failed to initialize system memory context");
                 Cleanup();
                 return false;
             }
         }
+        else {
+            if (gpuInfo.encoderType == EncoderType::NVIDIA_NVENC) {
+                m_codecContext->pix_fmt = AV_PIX_FMT_D3D11;
+            }
+            else {
+                m_codecContext->pix_fmt = AV_PIX_FMT_NV12;
+            }
 
-        m_codecContext->width = settings.width;
-        m_codecContext->height = settings.height;
-        m_codecContext->time_base = { 1, static_cast<int>(settings.fps) };
-        m_codecContext->framerate = { static_cast<int>(settings.fps), 1 };
-        m_codecContext->gop_size = settings.fps * 2;
-        m_codecContext->max_b_frames = 0;
-        m_codecContext->bit_rate = 0;
-
-        // Set flags for global headers (needed for MKV)
-        m_codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-        // FIX: Save keyframe interval
-        m_keyframeInterval = m_codecContext->gop_size;
+            if (!InitializeHardwareContext(settings, gpuInfo.encoderType)) {
+                spdlog::warn("Hardware context init failed, falling back to software");
+                m_useSystemMemory = true;
+                avcodec_free_context(&m_codecContext);
+                codec = GetSoftwareCodec(settings.codec);
+                if (!codec) return false;
+                m_codecContext = avcodec_alloc_context3(codec);
+                goto retry_init;
+            }
+        }
 
         // PRO TIP: Lower QP = Higher Quality. 0 is lossless. 10-15 is nearly perfect.
-        int targetQuality = 12; // Improved from 15 for even better quality
+        int targetQuality = 12;
 
+    open_codec:
         EncoderType effectiveType = m_useSystemMemory ? EncoderType::SOFTWARE : gpuInfo.encoderType;
         if (!ConfigureEncoderOptions(effectiveType, targetQuality)) {
             spdlog::warn("Some encoder options may not have been applied");
+        }
+
+        if (tryingSaferDefaults) {
+            av_opt_set(m_codecContext->priv_data, "profile", "high", 0);
+            av_opt_set(m_codecContext->priv_data, "preset", "medium", 0);
         }
 
         int ret = avcodec_open2(m_codecContext, codec, nullptr);
         if (ret < 0) {
             char errBuf[AV_ERROR_MAX_STRING_SIZE];
             av_strerror(ret, errBuf, sizeof(errBuf));
-            spdlog::error("Failed to open codec: {}", errBuf);
+            spdlog::warn("Failed to open codec ({}): {}. Retrying...", codec->name, errBuf);
+
+            if (!m_useSystemMemory && !tryingSaferDefaults) {
+                spdlog::info("Retrying with safer hardware defaults");
+                tryingSaferDefaults = true;
+                goto open_codec;
+            }
+
+            if (!m_useSystemMemory) {
+                spdlog::warn("Hardware defaults failed, falling back to software");
+                m_useSystemMemory = true;
+                tryingSaferDefaults = false;
+                avcodec_free_context(&m_codecContext);
+                codec = GetSoftwareCodec(settings.codec);
+                if (codec) {
+                    m_codecContext = avcodec_alloc_context3(codec);
+                    if (m_codecContext) goto retry_init;
+                }
+            }
+
+            spdlog::error("Failed to open any codec context");
             Cleanup();
             return false;
         }
@@ -331,6 +346,12 @@ public:
     bool IsInitialized() const { return m_codecContext != nullptr && m_packet != nullptr; }
 
 private:
+    const AVCodec* GetSoftwareCodec(Codec codec) {
+        if (codec == Codec::H265) return avcodec_find_encoder(AV_CODEC_ID_HEVC);
+        if (codec == Codec::AV1) return avcodec_find_encoder(AV_CODEC_ID_AV1);
+        return avcodec_find_encoder(AV_CODEC_ID_H264);
+    }
+
     void Cleanup() {
         if (m_swsContext) {
             sws_freeContext(m_swsContext);

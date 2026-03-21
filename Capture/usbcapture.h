@@ -549,7 +549,13 @@ private:
             if (texture) {
                 USBFrame frame;
                 frame.texture = texture;
-                frame.timestamp = GetCurrentTimestamp();
+
+                // Use high-precision QPC timestamp
+                LARGE_INTEGER qpcFreq, qpcNow;
+                QueryPerformanceFrequency(&qpcFreq);
+                QueryPerformanceCounter(&qpcNow);
+                frame.timestamp = (qpcNow.QuadPart * 1000000) / qpcFreq.QuadPart;
+
                 frame.frameIndex = static_cast<uint32_t>(m_frameCount++);
                 frame.isKeyframe = (frame.frameIndex % (m_fps * 2) == 0);
 

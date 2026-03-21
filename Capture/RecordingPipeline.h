@@ -164,14 +164,11 @@ public:
         spdlog::info("Capturing screenshot to: {}", outputPath);
 
         if (m_recording) {
-            {
-                std::lock_guard<std::mutex> lock(m_screenshotMutex);
-                m_screenshotRequested = true;
-                m_screenshotPath = outputPath;
-            }
+            std::unique_lock<std::mutex> lock(m_screenshotMutex);
+            m_screenshotRequested = true;
+            m_screenshotPath = outputPath;
 
             // Wait for screenshot to be taken (timeout after 1s) using a condition variable
-            std::unique_lock<std::mutex> lock(m_screenshotMutex);
             bool success = m_screenshotCv.wait_for(lock, std::chrono::seconds(1), [this] {
                 return !m_screenshotRequested;
             });
@@ -857,9 +854,6 @@ private:
         USBFrame usbFrame;
         std::vector<EncodedPacket> encodedPackets;
 
-        // FIX: Wait for first frame to establish recording start time
-        bool firstFrame = true;
-
         while (m_recording) {
             bool gotFrame = false;
 
@@ -937,27 +931,17 @@ private:
                 }
             }
 
-            // FIX: Set recording start time on first frame for A/V sync
-            if (firstFrame) {
-                m_recordingStartTime = GetCurrentTimestampUs();
-                m_firstVideoTimestamp = frame.timestamp;
-                spdlog::info("Recording start time set: {} us, first video ts: {}",
-                    m_recordingStartTime.load(), m_firstVideoTimestamp.load());
-                firstFrame = false;
-            }
-
             if (!m_encoder || !m_diskWriter) break;
 
-            // FIX: Calculate synchronized timestamp relative to recording start
-            uint64_t syncedTimestamp = m_recordingStartTime.load() + (frame.timestamp - m_firstVideoTimestamp.load());
-            frame.timestamp = syncedTimestamp;
+            // USE RAW CAPTURE TIMESTAMP. DiskWriter will anchor to the very first packet it sees.
+            uint64_t syncedTimestamp = frame.timestamp;
 
             encodedPackets.clear();
             if (m_encoder->EncodeFrame(frame, encodedPackets)) {
                 for (auto& packet : encodedPackets) {
                     WriteTask task;
                     task.data = std::move(packet.data);
-                    task.timestamp = syncedTimestamp;  // FIX: Use synced timestamp
+                    task.timestamp = syncedTimestamp;
                     task.isVideo = true;
                     task.pts = packet.pts;
                     task.keyframe = packet.keyframe;
@@ -980,25 +964,10 @@ private:
         spdlog::info("Audio loop started");
         AudioPacket packet;
 
-        // FIX: Wait for video to establish start time
-        while (m_recording && m_recordingStartTime.load() == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
-        uint64_t firstAudioTimestamp = 0;
-        bool firstPacket = true;
-
         while (m_recording) {
             if (m_audioCapture && m_diskWriter && m_audioCapture->GetNextPacket(packet, 50)) {
-                // FIX: Sync audio to same clock as video
-                if (firstPacket) {
-                    firstAudioTimestamp = packet.timestamp;
-                    firstPacket = false;
-                }
-
-                // Calculate synced timestamp: recording start + elapsed audio time
-                uint64_t syncedTimestamp = m_recordingStartTime.load() + (packet.timestamp - firstAudioTimestamp);
-                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), syncedTimestamp);
+                // USE RAW CAPTURE TIMESTAMP
+                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), packet.timestamp);
             }
         }
         spdlog::info("Audio loop exiting");
@@ -1008,25 +977,10 @@ private:
         spdlog::info("USB audio loop started");
         USBAudioPacket packet;
 
-        // FIX: Wait for video to establish start time
-        while (m_recording && m_recordingStartTime.load() == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
-        uint64_t firstAudioTimestamp = 0;
-        bool firstPacket = true;
-
         while (m_recording) {
             if (m_usbAudioCapture && m_diskWriter && m_usbAudioCapture->GetNextPacket(packet, 50)) {
-                // FIX: Sync USB audio to same clock as video
-                if (firstPacket) {
-                    firstAudioTimestamp = packet.timestamp;
-                    firstPacket = false;
-                }
-
-                // Calculate synced timestamp: recording start + elapsed audio time
-                uint64_t syncedTimestamp = m_recordingStartTime.load() + (packet.timestamp - firstAudioTimestamp);
-                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), syncedTimestamp);
+                // USE RAW CAPTURE TIMESTAMP
+                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), packet.timestamp);
             }
         }
         spdlog::info("USB audio loop exiting");
