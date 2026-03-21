@@ -11,6 +11,12 @@
 #include <d3d11_4.h> 
 #include <fstream>
 #include <filesystem>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <vector>
+#include <memory>
 
 class RecordingPipeline : public IRecordingEngine {
 public:
@@ -179,7 +185,7 @@ public:
     }
 
 private:
-    bool m_screenshotRequested{ false }; // Changed to bool since we'll use a mutex/cv
+    std::atomic<bool> m_screenshotRequested{ false };
     std::mutex m_screenshotMutex;
     std::condition_variable m_screenshotCv;
     std::string m_screenshotPath;
@@ -212,30 +218,30 @@ private:
 
         bool success = false;
         if (m_settings.usbDeviceIndex >= 0) {
-            SimpleUSBCapture usb;
-            if (usb.Initialize(m_settings.usbDeviceIndex, device)) {
-                if (usb.Start(1)) {
+            auto usb = std::make_unique<SimpleUSBCapture>();
+            if (usb->Initialize(m_settings.usbDeviceIndex, device)) {
+                if (usb->Start(1)) {
                     USBFrame frame;
-                    if (usb.GetFrame(frame, 2000)) {
+                    if (usb->GetFrame(frame, 2000)) {
                         SaveTextureAsPngManual(device, context, frame.texture, outputPath);
                         success = true;
                     }
-                    usb.Stop();
+                    usb->Stop();
                 }
             }
         } else {
             m_displayManager->SetActiveDisplay(m_settings.displayIndex);
             ComPtr<IDXGIOutput> output = m_displayManager->GetActiveDisplayOutput();
             if (output) {
-                FrameCapture cap;
-                if (cap.Initialize(false, nullptr, m_gpuInfo, device, context, output)) {
-                    if (cap.StartCapture(1, 60)) {
+                auto cap = std::make_unique<FrameCapture>();
+                if (cap->Initialize(false, nullptr, m_gpuInfo, device, context, output)) {
+                    if (cap->StartCapture(1, 60)) {
                         CapturedFrame frame;
-                        if (cap.GetNextFrame(frame, 2000)) {
+                        if (cap->GetNextFrame(frame, 2000)) {
                             SaveTextureAsPngManual(device, context, frame.texture, outputPath);
                             success = true;
                         }
-                        cap.StopCapture();
+                        cap->StopCapture();
                     }
                 }
             }
@@ -263,13 +269,14 @@ private:
             context->CopyResource(staging.Get(), texture.Get());
             D3D11_MAPPED_SUBRESOURCE mapped;
             if (SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+                // For manual save, we can do it synchronously as it's already in a separate thread from TakeScreenshot
                 SaveRawRgbaToPng(reinterpret_cast<uint8_t*>(mapped.pData), desc.Width, desc.Height, mapped.RowPitch, path);
                 context->Unmap(staging.Get(), 0);
             }
         }
     }
 
-    void SaveTextureAsPng(ComPtr<ID3D11Texture2D> texture, const std::string& path) {
+    void SaveTextureAsPngAsync(ComPtr<ID3D11Texture2D> texture, const std::string& path) {
         if (!texture) return;
 
         D3D11_TEXTURE2D_DESC desc;
@@ -299,13 +306,25 @@ private:
             return;
         }
 
-        // Use FFmpeg to save as PNG
-        SaveRawRgbaToPng(reinterpret_cast<uint8_t*>(mapped.pData), desc.Width, desc.Height, mapped.RowPitch, path);
+        // Copy raw data for async processing
+        size_t dataSize = mapped.RowPitch * desc.Height;
+        auto buffer = std::make_shared<std::vector<uint8_t>>(dataSize);
+        memcpy(buffer->data(), mapped.pData, dataSize);
 
         m_sharedD3D11Context->Unmap(stagingTexture.Get(), 0);
+
+        // Run PNG encoding in a separate thread to prevent recording stutter
+        // Use a shared_ptr buffer to keep data alive
+        std::thread([buffer, width = desc.Width, height = desc.Height, stride = mapped.RowPitch, path]() {
+            RecordingPipeline::SaveRawRgbaToPngStatic(buffer->data(), width, height, stride, path);
+        }).detach();
     }
 
-    void SaveRawRgbaToPng(uint8_t* rgbaData, uint32_t width, uint32_t height, uint32_t stride, const std::string& path) {
+    void SaveRawRgbaToPng(const uint8_t* bgraData, uint32_t width, uint32_t height, uint32_t stride, const std::string& path) {
+        SaveRawRgbaToPngStatic(bgraData, width, height, stride, path);
+    }
+
+    static void SaveRawRgbaToPngStatic(const uint8_t* bgraData, uint32_t width, uint32_t height, uint32_t stride, const std::string& path) {
         const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_PNG);
         if (!codec) {
             spdlog::error("PNG encoder not found");
@@ -317,7 +336,7 @@ private:
 
         c->width = width;
         c->height = height;
-        c->pix_fmt = AV_PIX_FMT_RGBA;
+        c->pix_fmt = AV_PIX_FMT_RGB24; // Better compatibility for PNG
         c->time_base = { 1, 1 };
 
         if (avcodec_open2(c, codec, nullptr) < 0) {
@@ -336,15 +355,22 @@ private:
             return;
         }
 
-        // Copy data to frame, handling stride
-        for (uint32_t y = 0; y < height; y++) {
-            memcpy(frame->data[0] + y * frame->linesize[0], rgbaData + y * stride, width * 4);
+        // Use sws_scale to convert BGRA to RGB24 correctly
+        SwsContext* sws = sws_getContext(width, height, AV_PIX_FMT_BGRA,
+                                       width, height, AV_PIX_FMT_RGB24,
+                                       SWS_BICUBIC, nullptr, nullptr, nullptr);
+
+        if (sws) {
+            const uint8_t* srcData[1] = { bgraData };
+            int srcLinesize[1] = { (int)stride };
+            sws_scale(sws, srcData, srcLinesize, 0, height, frame->data, frame->linesize);
+            sws_freeContext(sws);
         }
 
         AVPacket* pkt = av_packet_alloc();
         if (avcodec_send_frame(c, frame) >= 0) {
-            if (avcodec_receive_packet(c, pkt) >= 0) {
-                std::ofstream ofs(path, std::ios::binary);
+            std::ofstream ofs(path, std::ios::binary);
+            while (avcodec_receive_packet(c, pkt) >= 0) {
                 if (ofs) {
                     ofs.write(reinterpret_cast<char*>(pkt->data), pkt->size);
                 }
@@ -706,17 +732,21 @@ private:
                 }
             }
 
-            if (!gotFrame || !frame.texture) continue;
-
-            // Handle screenshot request
-            if (m_screenshotRequested) {
+            // Handle screenshot request - MUST be after getting a frame to have texture available
+            // but BEFORE potential 'continue' or errors to ensure responsiveness.
+            if (m_screenshotRequested && gotFrame && frame.texture) {
                 {
                     std::lock_guard<std::mutex> lock(m_screenshotMutex);
-                    SaveTextureAsPng(frame.texture, m_screenshotPath);
-                    m_screenshotRequested = false;
+                    // Double check inside lock
+                    if (m_screenshotRequested) {
+                        SaveTextureAsPngAsync(frame.texture, m_screenshotPath);
+                        m_screenshotRequested = false;
+                    }
                 }
                 m_screenshotCv.notify_all();
             }
+
+            if (!gotFrame || !frame.texture) continue;
 
             // FIX: Set recording start time on first frame for A/V sync
             if (firstFrame) {

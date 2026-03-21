@@ -118,6 +118,17 @@ public:
 
         m_useSystemMemory = (gpuInfo.encoderType == EncoderType::INTEL_QSV || gpuInfo.encoderType == EncoderType::SOFTWARE);
 
+        // Determine pixel format BEFORE context initialization to avoid mismatch
+        if (gpuInfo.encoderType == EncoderType::SOFTWARE) {
+            m_codecContext->pix_fmt = AV_PIX_FMT_YUV444P;
+        }
+        else if (gpuInfo.encoderType == EncoderType::NVIDIA_NVENC) {
+            m_codecContext->pix_fmt = AV_PIX_FMT_D3D11;
+        }
+        else {
+            m_codecContext->pix_fmt = AV_PIX_FMT_NV12;
+        }
+
         if (!m_useSystemMemory) {
             if (!InitializeHardwareContext(settings, gpuInfo.encoderType)) {
                 spdlog::error("Failed to initialize hardware context");
@@ -339,6 +350,7 @@ private:
     }
 
     bool InitializeHardwareContext(const RecordingSettings& settings, EncoderType encoderType) {
+        // NVENC can accept D3D11 textures directly
         m_hwDeviceCtx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
         if (!m_hwDeviceCtx) {
             spdlog::error("Failed to allocate hardware device context");
@@ -370,9 +382,10 @@ private:
         AVHWFramesContext* framesCtx = (AVHWFramesContext*)m_hwFramesCtx->data;
         framesCtx->format = AV_PIX_FMT_D3D11;
 
-        // Use YUV444P for hardware context if possible to avoid bleeding
-        // Note: Some hardware might only support NV12/P010
-        framesCtx->sw_format = (encoderType == EncoderType::NVIDIA_NVENC) ? AV_PIX_FMT_YUV444P : AV_PIX_FMT_BGRA;
+        // Always use BGRA for the software format of hardware frames.
+        // This is necessary because the input textures (DXGI_FORMAT_B8G8R8A8_UNORM)
+        // are directly mapped to BGRA.
+        framesCtx->sw_format = AV_PIX_FMT_BGRA;
 
         framesCtx->width = settings.width;
         framesCtx->height = settings.height;
@@ -399,11 +412,6 @@ private:
     }
 
     bool InitializeSystemMemoryContext(const RecordingSettings& settings, const GPUInfo& gpuInfo) {
-        // If software, we already set pix_fmt to YUV444P in ConfigureEncoderOptions
-        if (m_codecContext->pix_fmt != AV_PIX_FMT_YUV444P) {
-            m_codecContext->pix_fmt = AV_PIX_FMT_NV12;
-        }
-
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width = settings.width;
         desc.Height = settings.height;
@@ -424,7 +432,7 @@ private:
         m_swsContext = sws_getContext(
             settings.width, settings.height, AV_PIX_FMT_BGRA,
             settings.width, settings.height, m_codecContext->pix_fmt,
-            SWS_BICUBIC, nullptr, nullptr, nullptr);
+            SWS_LANCZOS, nullptr, nullptr, nullptr);
 
         if (!m_swsContext) {
             spdlog::error("Failed to create SWS context");
@@ -471,7 +479,13 @@ private:
             ret |= av_opt_set_int(m_codecContext->priv_data, "qp", targetQuality, 0);
 
             // Try to enable 4:4:4 for perfect color if supported by the profile
-            av_opt_set(m_codecContext->priv_data, "profile", "high444p", 0);
+            // We use av_opt_set which returns < 0 if the option/value is invalid for this GPU
+            if (av_opt_set(m_codecContext->priv_data, "profile", "high444p", 0) < 0) {
+                spdlog::warn("NVIDIA 4:4:4 profile not supported on this GPU, falling back to standard");
+            // If fallback is needed, sw_pix_fmt should ideally be updated if we already set it to YUV444P
+            // However, we set sw_format in InitializeHardwareContext based on encoderType.
+            // If we are here, encoderType was NVIDIA_NVENC.
+            }
 
             // FIX: Force IDR frames for keyframes
             ret |= av_opt_set(m_codecContext->priv_data, "forced-idr", "1", 0);
@@ -491,9 +505,6 @@ private:
             // libx264/libx265 presets
             ret |= av_opt_set(m_codecContext->priv_data, "preset", "veryslow", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "crf", std::to_string(targetQuality).c_str(), 0);
-
-            // For software, we can easily do 4:4:4 to prevent color bleeding
-            m_codecContext->pix_fmt = AV_PIX_FMT_YUV444P;
         }
 
         return (ret >= 0);  // Some options may not exist, that's OK
