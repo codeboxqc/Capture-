@@ -930,6 +930,7 @@ private:
         g_settings.gpuIndex = m_selectedGPU;
         g_settings.displayIndex = m_selectedDisplay;
         g_settings.usbDeviceIndex = m_selectedUSBDevice;
+        engine->UpdateSettings(g_settings);
 
         std::string currentOutputPath = g_outputPath;
         std::filesystem::path outputPath(currentOutputPath);

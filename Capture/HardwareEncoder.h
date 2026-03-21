@@ -171,7 +171,8 @@ public:
         // PRO TIP: Lower QP = Higher Quality. 0 is lossless. 10-15 is nearly perfect.
         int targetQuality = 12; // Improved from 15 for even better quality
 
-        if (!ConfigureEncoderOptions(gpuInfo.encoderType, targetQuality)) {
+        EncoderType effectiveType = m_useSystemMemory ? EncoderType::SOFTWARE : gpuInfo.encoderType;
+        if (!ConfigureEncoderOptions(effectiveType, targetQuality)) {
             spdlog::warn("Some encoder options may not have been applied");
         }
 
