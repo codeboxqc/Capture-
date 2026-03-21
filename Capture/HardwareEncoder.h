@@ -9,7 +9,6 @@ extern "C" {
 
 struct EncodedPacket {
     std::vector<uint8_t> data;
-    uint64_t sourceTimestamp;
     int64_t pts;
     bool keyframe;
 };
@@ -123,7 +122,7 @@ public:
     retry_init:
         m_codecContext->width = settings.width;
         m_codecContext->height = settings.height;
-        m_codecContext->time_base = { 1, static_cast<int>(settings.fps) };
+        m_codecContext->time_base = { 1, 1000000 }; // Microseconds
         m_codecContext->framerate = { static_cast<int>(settings.fps), 1 };
         m_codecContext->gop_size = static_cast<int>(settings.fps * 2);
         m_codecContext->max_b_frames = 0;
@@ -247,7 +246,7 @@ public:
             return false;
         }
 
-        avFrame->pts = frame.frameIndex;
+        avFrame->pts = frame.timestamp;
 
         // FIX: Properly request keyframe (pict_type only - key_frame removed in newer FFmpeg)
         if (frame.isKeyframe || (m_frameCount % m_keyframeInterval == 0)) {
@@ -287,7 +286,6 @@ public:
             EncodedPacket ep;
             ep.data.assign(m_packet->data, m_packet->data + m_packet->size);
             ep.pts = m_packet->pts;
-            ep.sourceTimestamp = frame.timestamp;
             ep.keyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
 
             outPackets.push_back(std::move(ep));
@@ -317,7 +315,6 @@ public:
             EncodedPacket ep;
             ep.data.assign(m_packet->data, m_packet->data + m_packet->size);
             ep.pts = m_packet->pts;
-            ep.sourceTimestamp = 0;
             ep.keyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
 
             outPackets.push_back(std::move(ep));
@@ -332,18 +329,22 @@ public:
 
     std::vector<uint8_t> GetExtradata() const {
         if (!m_codecContext) return {};
-        if (!m_codecContext->extradata || m_codecContext->extradata_size <= 0) return {};
         
-        return std::vector<uint8_t>(
-            m_codecContext->extradata, 
-            m_codecContext->extradata + m_codecContext->extradata_size
-        );
+        // Check if extradata was updated during encoding
+        if (m_codecContext->extradata && m_codecContext->extradata_size > 0) {
+            return std::vector<uint8_t>(
+                m_codecContext->extradata,
+                m_codecContext->extradata + m_codecContext->extradata_size
+            );
+        }
+        return {};
     }
     
     // FIX: Added stats getters
     uint64_t GetFrameCount() const { return m_frameCount; }
     uint64_t GetEncodedFrames() const { return m_encodedFrames.load(); }
     bool IsInitialized() const { return m_codecContext != nullptr && m_packet != nullptr; }
+    AVPixelFormat GetPixelFormat() const { return m_codecContext ? m_codecContext->pix_fmt : AV_PIX_FMT_NONE; }
 
 private:
     const AVCodec* GetSoftwareCodec(Codec codec) {
@@ -517,8 +518,11 @@ private:
                 spdlog::warn("NVIDIA 4:4:4 profile '{}' not supported on this GPU, falling back to standard", profile);
             }
 
-            // FIX: Force IDR frames for keyframes
+            // FIX: Force IDR frames for keyframes to ensure seekability
             ret |= av_opt_set(m_codecContext->priv_data, "forced-idr", "1", 0);
+
+            // Repeat headers for robustness
+            ret |= av_opt_set(m_codecContext->priv_data, "repeat-headers", "1", 0);
         }
         else if (encoderType == EncoderType::AMD_AMF) {
             ret |= av_opt_set(m_codecContext->priv_data, "quality", "quality", 0); // "quality" is higher than "balanced"

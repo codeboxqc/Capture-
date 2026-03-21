@@ -619,7 +619,7 @@ private:
         }
 
         m_diskWriter = std::make_unique<DiskWriter>();
-        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata())) {
+        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata(), m_encoder->GetPixelFormat())) {
             spdlog::error("Failed to initialize disk writer");
             CleanupOnFailure();
             return false;
@@ -767,7 +767,7 @@ private:
         }
 
         m_diskWriter = std::make_unique<DiskWriter>();
-        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata())) {
+        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata(), m_encoder->GetPixelFormat())) {
             spdlog::error("Failed to initialize disk writer");
             CleanupOnFailure();
             return false;
@@ -933,15 +933,14 @@ private:
 
             if (!m_encoder || !m_diskWriter) break;
 
-            // USE RAW CAPTURE TIMESTAMP. DiskWriter will anchor to the very first packet it sees.
-            uint64_t syncedTimestamp = frame.timestamp;
-
             encodedPackets.clear();
             if (m_encoder->EncodeFrame(frame, encodedPackets)) {
                 for (auto& packet : encodedPackets) {
                     WriteTask task;
                     task.data = std::move(packet.data);
-                    task.timestamp = syncedTimestamp;
+                    // Use packet PTS as the task timestamp.
+                    // This is the original QPC timestamp of the frame.
+                    task.timestamp = static_cast<uint64_t>(packet.pts);
                     task.isVideo = true;
                     task.pts = packet.pts;
                     task.keyframe = packet.keyframe;

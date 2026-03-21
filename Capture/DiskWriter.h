@@ -29,7 +29,7 @@ public:
 
     ~DiskWriter() { StopWriter(); }
 
-    bool Initialize(const RecordingSettings& settings, const std::vector<uint8_t>& extradata = {}) {
+    bool Initialize(const RecordingSettings& settings, const std::vector<uint8_t>& extradata = {}, AVPixelFormat pixelFormat = AV_PIX_FMT_YUV420P) {
         m_settings = settings;
         m_outputPath = settings.outputPath;
         m_outputPath.replace_extension(".mkv");
@@ -62,8 +62,12 @@ public:
             (settings.codec == Codec::AV1) ? AV_CODEC_ID_AV1 : AV_CODEC_ID_HEVC;
         m_videoStream->codecpar->width = settings.width;
         m_videoStream->codecpar->height = settings.height;
-        m_videoStream->codecpar->format = AV_PIX_FMT_YUV420P;
-        m_videoStream->time_base = { 1, 1000 };
+
+        // Match encoder pixel format (important for 4:4:4)
+        m_videoStream->codecpar->format = pixelFormat;
+
+        // Use high-precision timebase for MKV
+        m_videoStream->time_base = { 1, 1000000 };
 
         if (!extradata.empty()) {
             // FIX: Check allocation success
@@ -137,19 +141,11 @@ public:
                 lock.unlock();
 
                 if (!m_headerWritten) {
-                    // Set start timestamp based on the very first packet we see (audio or video)
-                    if (m_startTimestamp == 0) {
+                    // We MUST start with a video keyframe to avoid scramble/grey frames in VLC.
+                    // Audio can wait for the first video keyframe.
+                    if (task.isVideo && task.keyframe) {
+                        // Anchoring start to EXACT timestamp of the first keyframe
                         m_startTimestamp = task.timestamp;
-                        spdlog::info("Recording start timestamp anchored to {} ({} packet)",
-                            m_startTimestamp, task.isVideo ? "video" : "audio");
-                    }
-
-                    // Write header as soon as we can.
-                    // Ideally we wait for a video keyframe for seekability, but we must not wait too long
-                    // or we lose initial audio.
-                    bool shouldWriteHeader = (task.isVideo && task.keyframe) || (!task.isVideo);
-
-                    if (shouldWriteHeader) {
                         int ret = avformat_write_header(m_formatContext, nullptr);
                         if (ret < 0) {
                             char errBuf[AV_ERROR_MAX_STRING_SIZE];
@@ -158,10 +154,12 @@ public:
                             continue;
                         }
                         m_headerWritten = true;
-                        spdlog::info("MKV header written, recording started ({} triggered)", task.isVideo ? "video" : "audio");
+                        spdlog::info("MKV header written anchored to video keyframe: {}", m_startTimestamp);
+                    } else {
+                        // Drop everything until the first video keyframe arrives.
+                        // This ensures the video is immediately seekable and has no scrambled start.
+                        continue;
                     }
-                    
-                    if (!m_headerWritten) continue; // Drop until header is written
                 }
 
                 (task.isVideo) ? WriteVideo(task) : WriteAudio(task);
@@ -282,8 +280,11 @@ private:
         memcpy(pkt->data, task.data.data(), task.data.size());
 
         pkt->stream_index = m_videoStream->index;
+
+        // Use encoder's PTS/DTS directly if available, relative to recording start
         int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
-        pkt->pts = pkt->dts = av_rescale_q(pts_us, { 1, 1000000 }, m_videoStream->time_base);
+        pkt->pts = av_rescale_q(pts_us, { 1, 1000000 }, m_videoStream->time_base);
+        pkt->dts = pkt->pts; // For near-lossless / low-latency capture, DTS usually matches PTS
 
         if (task.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
 
