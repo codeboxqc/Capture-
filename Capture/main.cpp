@@ -527,6 +527,17 @@ private:
                         ImGui::PopStyleColor(3);
                     }
 
+                    ImGui::SameLine();
+
+                    // Screenshot Button
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.85f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.25f, 1.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.10f, 0.65f, 1.0f));
+                    if (ImGui::Button("TAKE SCREENSHOT", ImVec2(180, 40))) {
+                        TakeScreenshot();
+                    }
+                    ImGui::PopStyleColor(3);
+
                     ImGui::Spacing();
                     ImGui::Spacing();
                     ImGui::Separator();
@@ -875,6 +886,27 @@ private:
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         g_pSwapChain->Present(1, 0);
+    }
+
+    void TakeScreenshot() {
+        if (!g_engine) return;
+
+        std::filesystem::path outputPath(g_outputPath);
+        std::filesystem::path folderPath = outputPath.parent_path();
+
+        // Ensure folder exists
+        if (!std::filesystem::exists(folderPath)) {
+            std::filesystem::create_directories(folderPath);
+        }
+
+        std::string screenshotBase = (folderPath / "screenshot.png").string();
+        std::string uniquePath = GetUniqueFilename(screenshotBase);
+
+        if (g_engine->CaptureScreenshot(uniquePath)) {
+            g_statusMessage = "Screenshot saved: " + std::filesystem::path(uniquePath).filename().string();
+        } else {
+            g_statusMessage = "Failed to take screenshot";
+        }
     }
 
     void StartRecording() {

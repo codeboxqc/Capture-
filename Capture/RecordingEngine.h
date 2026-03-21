@@ -150,6 +150,9 @@ public:
     virtual std::vector<ExtendedGPUInfo> GetAvailableGPUs() const = 0;
     virtual void SetStatusCallback(std::function<void(const std::string&)> callback) = 0;
     virtual void SetErrorCallback(std::function<void(const std::string&)> callback) = 0;
+
+    // --- NEW FEATURE: SCREENSHOT CAPTURE ---
+    virtual bool CaptureScreenshot(const std::string& outputPath) = 0;
 };
 
 std::unique_ptr<IRecordingEngine> CreateRecordingEngine();

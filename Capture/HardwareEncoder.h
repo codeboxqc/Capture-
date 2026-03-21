@@ -119,7 +119,7 @@ public:
         m_useSystemMemory = (gpuInfo.encoderType == EncoderType::INTEL_QSV || gpuInfo.encoderType == EncoderType::SOFTWARE);
 
         if (!m_useSystemMemory) {
-            if (!InitializeHardwareContext(settings)) {
+            if (!InitializeHardwareContext(settings, gpuInfo.encoderType)) {
                 spdlog::error("Failed to initialize hardware context");
                 Cleanup();
                 return false;
@@ -147,7 +147,8 @@ public:
         // FIX: Save keyframe interval
         m_keyframeInterval = m_codecContext->gop_size;
 
-        int targetQuality = 15;
+        // PRO TIP: Lower QP = Higher Quality. 0 is lossless. 10-15 is nearly perfect.
+        int targetQuality = 12; // Improved from 15 for even better quality
 
         if (!ConfigureEncoderOptions(gpuInfo.encoderType, targetQuality)) {
             spdlog::warn("Some encoder options may not have been applied");
@@ -337,7 +338,7 @@ private:
         m_stagingTexture.Reset();
     }
 
-    bool InitializeHardwareContext(const RecordingSettings& settings) {
+    bool InitializeHardwareContext(const RecordingSettings& settings, EncoderType encoderType) {
         m_hwDeviceCtx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
         if (!m_hwDeviceCtx) {
             spdlog::error("Failed to allocate hardware device context");
@@ -368,7 +369,11 @@ private:
 
         AVHWFramesContext* framesCtx = (AVHWFramesContext*)m_hwFramesCtx->data;
         framesCtx->format = AV_PIX_FMT_D3D11;
-        framesCtx->sw_format = AV_PIX_FMT_BGRA;
+
+        // Use YUV444P for hardware context if possible to avoid bleeding
+        // Note: Some hardware might only support NV12/P010
+        framesCtx->sw_format = (encoderType == EncoderType::NVIDIA_NVENC) ? AV_PIX_FMT_YUV444P : AV_PIX_FMT_BGRA;
+
         framesCtx->width = settings.width;
         framesCtx->height = settings.height;
         framesCtx->initial_pool_size = 64;
@@ -388,13 +393,16 @@ private:
         }
         
         m_codecContext->pix_fmt = AV_PIX_FMT_D3D11;
-        m_codecContext->sw_pix_fmt = AV_PIX_FMT_BGRA;
+        m_codecContext->sw_pix_fmt = framesCtx->sw_format;
 
         return true;
     }
 
     bool InitializeSystemMemoryContext(const RecordingSettings& settings, const GPUInfo& gpuInfo) {
-        m_codecContext->pix_fmt = AV_PIX_FMT_NV12;
+        // If software, we already set pix_fmt to YUV444P in ConfigureEncoderOptions
+        if (m_codecContext->pix_fmt != AV_PIX_FMT_YUV444P) {
+            m_codecContext->pix_fmt = AV_PIX_FMT_NV12;
+        }
 
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width = settings.width;
@@ -415,8 +423,8 @@ private:
 
         m_swsContext = sws_getContext(
             settings.width, settings.height, AV_PIX_FMT_BGRA,
-            settings.width, settings.height, AV_PIX_FMT_NV12,
-            SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+            settings.width, settings.height, m_codecContext->pix_fmt,
+            SWS_BICUBIC, nullptr, nullptr, nullptr);
 
         if (!m_swsContext) {
             spdlog::error("Failed to create SWS context");
@@ -454,36 +462,45 @@ private:
         int ret = 0;
 
         if (encoderType == EncoderType::NVIDIA_NVENC) {
-            ret |= av_opt_set(m_codecContext->priv_data, "preset", "p4", 0);
+            // "p7" is the slowest/highest quality preset for NVENC
+            ret |= av_opt_set(m_codecContext->priv_data, "preset", "p7", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "tune", "hq", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "delay", "0", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "zerolatency", "1", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "rc", "constqp", 0);
             ret |= av_opt_set_int(m_codecContext->priv_data, "qp", targetQuality, 0);
+
+            // Try to enable 4:4:4 for perfect color if supported by the profile
+            av_opt_set(m_codecContext->priv_data, "profile", "high444p", 0);
+
             // FIX: Force IDR frames for keyframes
             ret |= av_opt_set(m_codecContext->priv_data, "forced-idr", "1", 0);
         }
         else if (encoderType == EncoderType::AMD_AMF) {
-            ret |= av_opt_set(m_codecContext->priv_data, "quality", "balanced", 0);
+            ret |= av_opt_set(m_codecContext->priv_data, "quality", "quality", 0); // "quality" is higher than "balanced"
             ret |= av_opt_set(m_codecContext->priv_data, "rc", "cqp", 0);
             ret |= av_opt_set_int(m_codecContext->priv_data, "qp_i", targetQuality, 0);
             ret |= av_opt_set_int(m_codecContext->priv_data, "qp_p", targetQuality, 0);
         }
         else if (encoderType == EncoderType::INTEL_QSV) {
-            ret |= av_opt_set(m_codecContext->priv_data, "preset", "balanced", 0);
-            ret |= av_opt_set(m_codecContext->priv_data, "async_depth", "2", 0);
+            ret |= av_opt_set(m_codecContext->priv_data, "preset", "veryslow", 0); // "veryslow" is highest quality
+            ret |= av_opt_set(m_codecContext->priv_data, "async_depth", "4", 0);
             ret |= av_opt_set_int(m_codecContext->priv_data, "global_quality", targetQuality, 0);
         }
         else if (encoderType == EncoderType::SOFTWARE) {
-            ret |= av_opt_set(m_codecContext->priv_data, "preset", "ultrafast", 0);
+            // libx264/libx265 presets
+            ret |= av_opt_set(m_codecContext->priv_data, "preset", "veryslow", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "crf", std::to_string(targetQuality).c_str(), 0);
+
+            // For software, we can easily do 4:4:4 to prevent color bleeding
+            m_codecContext->pix_fmt = AV_PIX_FMT_YUV444P;
         }
 
         return (ret >= 0);  // Some options may not exist, that's OK
     }
 
     bool PrepareSystemMemoryFrame(const CapturedFrame& frame, AVFrame* avFrame) {
-        avFrame->format = AV_PIX_FMT_NV12;
+        avFrame->format = m_codecContext->pix_fmt;
         avFrame->width = m_codecContext->width;
         avFrame->height = m_codecContext->height;
 
