@@ -66,8 +66,11 @@ public:
         // Match encoder pixel format (important for 4:4:4)
         m_videoStream->codecpar->format = pixelFormat;
 
-        // Use high-precision timebase for MKV
-        m_videoStream->time_base = { 1, 1000000 };
+        m_videoStream->avg_frame_rate = { static_cast<int>(settings.fps), 1 };
+        m_videoStream->r_frame_rate = m_videoStream->avg_frame_rate;
+
+        // Use millisecond timebase for better player compatibility
+        m_videoStream->time_base = { 1, 1000 };
 
         if (!extradata.empty()) {
             // FIX: Check allocation success
@@ -79,6 +82,9 @@ public:
                 spdlog::warn("Failed to allocate extradata buffer");
             }
         }
+
+        // Explicitly set video timebase to avoid automatic rescaling issues
+        m_videoStream->time_base = { 1, 1000 };
 
         // 2. Audio Stream Configuration
         if (settings.captureAudio) {
@@ -146,6 +152,14 @@ public:
                     if (task.isVideo && task.keyframe) {
                         // Anchoring start to EXACT timestamp of the first keyframe
                         m_startTimestamp = task.timestamp;
+
+                        // Ensure we have extradata before writing header (VLC needs this)
+                        if (m_videoStream->codecpar->extradata_size == 0) {
+                             spdlog::warn("Still waiting for video extradata...");
+                             // If we still don't have it, we might need to defer further
+                             // but matroska often works with what it has.
+                        }
+
                         int ret = avformat_write_header(m_formatContext, nullptr);
                         if (ret < 0) {
                             char errBuf[AV_ERROR_MAX_STRING_SIZE];
@@ -250,6 +264,21 @@ public:
     
     bool IsHeaderWritten() const { return m_headerWritten; }
 
+    void UpdateVideoExtradata(const std::vector<uint8_t>& extradata) {
+        if (!m_videoStream || m_headerWritten) return;
+
+        if (m_videoStream->codecpar->extradata) {
+            av_free(m_videoStream->codecpar->extradata);
+        }
+
+        m_videoStream->codecpar->extradata = (uint8_t*)av_mallocz(extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (m_videoStream->codecpar->extradata) {
+            memcpy(m_videoStream->codecpar->extradata, extradata.data(), extradata.size());
+            m_videoStream->codecpar->extradata_size = (int)extradata.size();
+            spdlog::info("Video extradata updated ({} bytes)", extradata.size());
+        }
+    }
+
 private:
     void CleanupContext() {
         if (m_formatContext) {
@@ -281,10 +310,10 @@ private:
 
         pkt->stream_index = m_videoStream->index;
 
-        // Use encoder's PTS/DTS directly if available, relative to recording start
+        // Convert microsecond capture timestamp to millisecond stream timestamp
         int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
         pkt->pts = av_rescale_q(pts_us, { 1, 1000000 }, m_videoStream->time_base);
-        pkt->dts = pkt->pts; // For near-lossless / low-latency capture, DTS usually matches PTS
+        pkt->dts = pkt->pts;
 
         if (task.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
 

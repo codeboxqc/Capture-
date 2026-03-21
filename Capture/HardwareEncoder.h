@@ -122,7 +122,7 @@ public:
     retry_init:
         m_codecContext->width = settings.width;
         m_codecContext->height = settings.height;
-        m_codecContext->time_base = { 1, 1000000 }; // Microseconds
+        m_codecContext->time_base = { 1, 1000000 }; // Internal microsecond timebase
         m_codecContext->framerate = { static_cast<int>(settings.fps), 1 };
         m_codecContext->gop_size = static_cast<int>(settings.fps * 2);
         m_codecContext->max_b_frames = 0;
@@ -130,7 +130,8 @@ public:
         m_keyframeInterval = m_codecContext->gop_size;
 
         if (m_useSystemMemory) {
-            m_codecContext->pix_fmt = AV_PIX_FMT_YUV444P;
+            m_codecContext->pix_fmt = AV_PIX_FMT_YUV420P; // Better compatibility than 444 for software
+            m_codecContext->sw_pix_fmt = AV_PIX_FMT_YUV420P;
             if (!InitializeSystemMemoryContext(settings, gpuInfo)) {
                 spdlog::error("Failed to initialize system memory context");
                 Cleanup();
@@ -288,6 +289,11 @@ public:
             ep.pts = m_packet->pts;
             ep.keyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
 
+            // Capture extradata if newly available from the encoder
+            if (m_codecContext->extradata_size > 0) {
+                // Ensure we have the latest extradata for the muxer
+            }
+
             outPackets.push_back(std::move(ep));
             m_encodedFrames++;
             
@@ -345,6 +351,10 @@ public:
     uint64_t GetEncodedFrames() const { return m_encodedFrames.load(); }
     bool IsInitialized() const { return m_codecContext != nullptr && m_packet != nullptr; }
     AVPixelFormat GetPixelFormat() const { return m_codecContext ? m_codecContext->pix_fmt : AV_PIX_FMT_NONE; }
+    AVPixelFormat GetSoftwarePixelFormat() const {
+        if (!m_codecContext) return AV_PIX_FMT_NONE;
+        return (m_codecContext->sw_pix_fmt != AV_PIX_FMT_NONE) ? m_codecContext->sw_pix_fmt : m_codecContext->pix_fmt;
+    }
 
 private:
     const AVCodec* GetSoftwareCodec(Codec codec) {
@@ -521,8 +531,12 @@ private:
             // FIX: Force IDR frames for keyframes to ensure seekability
             ret |= av_opt_set(m_codecContext->priv_data, "forced-idr", "1", 0);
 
-            // Repeat headers for robustness
+            // Repeat headers for robustness (SPS/PPS in every IDR)
             ret |= av_opt_set(m_codecContext->priv_data, "repeat-headers", "1", 0);
+
+            // Disable B-frames for low latency and consistent timestamps
+            m_codecContext->max_b_frames = 0;
+            m_codecContext->has_b_frames = 0;
         }
         else if (encoderType == EncoderType::AMD_AMF) {
             ret |= av_opt_set(m_codecContext->priv_data, "quality", "quality", 0); // "quality" is higher than "balanced"

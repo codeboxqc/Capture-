@@ -119,8 +119,8 @@ public:
             for (auto& packet : finalPackets) {
                 WriteTask task;
                 task.data = std::move(packet.data);
-                // FIX: Use current time for flush packets (they're from recent frames)
-                task.timestamp = GetCurrentTimestampUs();
+                // Flush packets already have the correct QPC pts from the encoder
+                task.timestamp = static_cast<uint64_t>(packet.pts);
                 task.isVideo = true;
                 task.pts = packet.pts;
                 task.keyframe = packet.keyframe;
@@ -619,7 +619,7 @@ private:
         }
 
         m_diskWriter = std::make_unique<DiskWriter>();
-        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata(), m_encoder->GetPixelFormat())) {
+        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata(), m_encoder->GetSoftwarePixelFormat())) {
             spdlog::error("Failed to initialize disk writer");
             CleanupOnFailure();
             return false;
@@ -767,7 +767,7 @@ private:
         }
 
         m_diskWriter = std::make_unique<DiskWriter>();
-        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata(), m_encoder->GetPixelFormat())) {
+        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata(), m_encoder->GetSoftwarePixelFormat())) {
             spdlog::error("Failed to initialize disk writer");
             CleanupOnFailure();
             return false;
@@ -935,6 +935,14 @@ private:
 
             encodedPackets.clear();
             if (m_encoder->EncodeFrame(frame, encodedPackets)) {
+                // If this is a keyframe and we don't have extradata in DiskWriter yet, try to update it
+                if (frame.isKeyframe && m_diskWriter && !m_diskWriter->IsHeaderWritten()) {
+                    auto extradata = m_encoder->GetExtradata();
+                    if (!extradata.empty()) {
+                        m_diskWriter->UpdateVideoExtradata(extradata);
+                    }
+                }
+
                 for (auto& packet : encodedPackets) {
                     WriteTask task;
                     task.data = std::move(packet.data);
