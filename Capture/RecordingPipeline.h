@@ -14,7 +14,9 @@
 
 class RecordingPipeline : public IRecordingEngine {
 public:
-    RecordingPipeline() : m_recording(false), m_droppedFrames(0), m_systemMemory(0), m_isSameAdapter(true), m_isUSBCapture(false) {}
+    RecordingPipeline() : m_recording(false), m_droppedFrames(0), m_systemMemory(0),
+        m_isSameAdapter(true), m_isUSBCapture(false), m_recordingStartTime(0), m_firstVideoTimestamp(0) {
+    }
 
     ~RecordingPipeline() {
         Shutdown();
@@ -76,7 +78,7 @@ public:
         if (!m_recording) return;
 
         spdlog::info("Stopping recording...");
-        
+
         // FIX: Set flag first to stop all loops
         m_recording = false;
 
@@ -84,13 +86,13 @@ public:
         // This prevents accessing freed memory
         spdlog::info("Waiting for processing thread...");
         if (m_processThread.joinable()) m_processThread.join();
-        
+
         spdlog::info("Waiting for sync thread...");
         if (m_syncThread.joinable()) m_syncThread.join();
-        
+
         spdlog::info("Waiting for audio thread...");
         if (m_audioThread.joinable()) m_audioThread.join();
-        
+
         // FIX: Wait for USB audio thread too
         spdlog::info("Waiting for USB audio thread...");
         if (m_usbAudioThread.joinable()) m_usbAudioThread.join();
@@ -110,7 +112,8 @@ public:
             for (auto& packet : finalPackets) {
                 WriteTask task;
                 task.data = std::move(packet.data);
-                task.timestamp = packet.sourceTimestamp;
+                // FIX: Use current time for flush packets (they're from recent frames)
+                task.timestamp = GetCurrentTimestampUs();
                 task.isVideo = true;
                 task.pts = packet.pts;
                 task.keyframe = packet.keyframe;
@@ -120,6 +123,10 @@ public:
 
         spdlog::info("Stopping disk writer...");
         if (m_diskWriter) m_diskWriter->StopWriter();
+
+        // FIX: Reset sync variables for next recording
+        m_recordingStartTime = 0;
+        m_firstVideoTimestamp = 0;
 
         spdlog::info("Recording stopped");
         if (m_statusCallback) m_statusCallback("Recording stopped");
@@ -464,12 +471,15 @@ private:
         USBFrame usbFrame;
         std::vector<EncodedPacket> encodedPackets;
 
+        // FIX: Wait for first frame to establish recording start time
+        bool firstFrame = true;
+
         while (m_recording) {
             bool gotFrame = false;
-            
+
             if (m_isUSBCapture) {
                 if (!m_usbCapture) break;
-                
+
                 gotFrame = m_usbCapture->GetFrame(usbFrame, 50);
                 if (gotFrame && usbFrame.texture) {
                     frame.texture = usbFrame.texture;
@@ -480,7 +490,7 @@ private:
             }
             else {
                 if (!m_frameCapture) break;
-                
+
                 gotFrame = m_frameCapture->GetNextFrame(frame, 50);
                 if (gotFrame) {
                     frame.isKeyframe = (frame.frameIndex % 60 == 0);
@@ -489,14 +499,27 @@ private:
 
             if (!gotFrame || !frame.texture) continue;
 
+            // FIX: Set recording start time on first frame for A/V sync
+            if (firstFrame) {
+                m_recordingStartTime = GetCurrentTimestampUs();
+                m_firstVideoTimestamp = frame.timestamp;
+                spdlog::info("Recording start time set: {} us, first video ts: {}",
+                    m_recordingStartTime.load(), m_firstVideoTimestamp.load());
+                firstFrame = false;
+            }
+
             if (!m_encoder || !m_diskWriter) break;
+
+            // FIX: Calculate synchronized timestamp relative to recording start
+            uint64_t syncedTimestamp = m_recordingStartTime.load() + (frame.timestamp - m_firstVideoTimestamp.load());
+            frame.timestamp = syncedTimestamp;
 
             encodedPackets.clear();
             if (m_encoder->EncodeFrame(frame, encodedPackets)) {
                 for (auto& packet : encodedPackets) {
                     WriteTask task;
                     task.data = std::move(packet.data);
-                    task.timestamp = packet.sourceTimestamp;
+                    task.timestamp = syncedTimestamp;  // FIX: Use synced timestamp
                     task.isVideo = true;
                     task.pts = packet.pts;
                     task.keyframe = packet.keyframe;
@@ -507,7 +530,8 @@ private:
             // Return texture to pool
             if (m_isUSBCapture && m_usbCapture) {
                 m_usbCapture->ReturnTexture(usbFrame.texture);
-            } else if (m_frameCapture) {
+            }
+            else if (m_frameCapture) {
                 m_frameCapture->ReturnTexture(frame.texture);
             }
         }
@@ -517,9 +541,26 @@ private:
     void AudioLoop() {
         spdlog::info("Audio loop started");
         AudioPacket packet;
+
+        // FIX: Wait for video to establish start time
+        while (m_recording && m_recordingStartTime.load() == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        uint64_t firstAudioTimestamp = 0;
+        bool firstPacket = true;
+
         while (m_recording) {
             if (m_audioCapture && m_diskWriter && m_audioCapture->GetNextPacket(packet, 50)) {
-                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), packet.timestamp);
+                // FIX: Sync audio to same clock as video
+                if (firstPacket) {
+                    firstAudioTimestamp = packet.timestamp;
+                    firstPacket = false;
+                }
+
+                // Calculate synced timestamp: recording start + elapsed audio time
+                uint64_t syncedTimestamp = m_recordingStartTime.load() + (packet.timestamp - firstAudioTimestamp);
+                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), syncedTimestamp);
             }
         }
         spdlog::info("Audio loop exiting");
@@ -528,9 +569,26 @@ private:
     void USBAudioLoop() {
         spdlog::info("USB audio loop started");
         USBAudioPacket packet;
+
+        // FIX: Wait for video to establish start time
+        while (m_recording && m_recordingStartTime.load() == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        uint64_t firstAudioTimestamp = 0;
+        bool firstPacket = true;
+
         while (m_recording) {
             if (m_usbAudioCapture && m_diskWriter && m_usbAudioCapture->GetNextPacket(packet, 50)) {
-                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), packet.timestamp);
+                // FIX: Sync USB audio to same clock as video
+                if (firstPacket) {
+                    firstAudioTimestamp = packet.timestamp;
+                    firstPacket = false;
+                }
+
+                // Calculate synced timestamp: recording start + elapsed audio time
+                uint64_t syncedTimestamp = m_recordingStartTime.load() + (packet.timestamp - firstAudioTimestamp);
+                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), syncedTimestamp);
             }
         }
         spdlog::info("USB audio loop exiting");
@@ -542,6 +600,13 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         spdlog::info("AV sync thread stopped");
+    }
+
+    // FIX: Helper function for consistent timestamp generation
+    static uint64_t GetCurrentTimestampUs() {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::high_resolution_clock::now().time_since_epoch()
+        ).count();
     }
 
     std::unique_ptr<GPUDetector> m_gpuDetector;
@@ -568,6 +633,10 @@ private:
     std::atomic<uint32_t> m_droppedFrames;
     bool m_isSameAdapter;
     bool m_isUSBCapture;
+
+    // FIX: A/V sync - shared recording clock
+    std::atomic<uint64_t> m_recordingStartTime;   // When recording started (common reference)
+    std::atomic<uint64_t> m_firstVideoTimestamp;  // First video frame's device timestamp
 
     std::thread m_processThread;
     std::thread m_syncThread;
