@@ -24,7 +24,8 @@ struct WriteTask {
 class DiskWriter {
 public:
     DiskWriter() : m_running(false), m_formatContext(nullptr), m_videoStream(nullptr), m_audioStream(nullptr),
-        m_headerWritten(false), m_startTimestamp(0), m_bytesWritten(0), m_framesWritten(0), m_audioPacketsWritten(0) {
+        m_headerWritten(false), m_startTimestamp(0), m_bytesWritten(0), m_framesWritten(0), m_audioPacketsWritten(0),
+        m_lastVideoPts(-1), m_lastAudioPts(-1) {
     }
 
     ~DiskWriter() { StopWriter(); }
@@ -138,8 +139,23 @@ public:
                 lock.unlock();
 
                 if (!m_headerWritten) {
+                    bool shouldWriteHeader = false;
                     if (task.isVideo && task.keyframe) {
                         m_startTimestamp = task.timestamp;
+                        shouldWriteHeader = true;
+                        spdlog::info("Video keyframe received, triggering header.");
+                    }
+                    else if (!task.isVideo && m_audioPacketsWritten > 10) {
+                        // Allow audio to trigger header if video is late
+                        if (m_startTimestamp == 0) m_startTimestamp = task.timestamp;
+                        shouldWriteHeader = true;
+                        spdlog::warn("Video keyframe delayed. Triggering header via audio packets.");
+                    }
+                    else if (!task.isVideo && m_startTimestamp == 0) {
+                        m_startTimestamp = task.timestamp;
+                    }
+
+                    if (shouldWriteHeader) {
                         int ret = avformat_write_header(m_formatContext, nullptr);
                         if (ret < 0) {
                             char errBuf[AV_ERROR_MAX_STRING_SIZE];
@@ -148,21 +164,13 @@ public:
                             continue;
                         }
                         m_headerWritten = true;
-                        spdlog::info("MKV header written, recording started");
-                    }
-                    else if (!task.isVideo && m_bytesWritten > 0) {
-                        // Allow audio to trigger header if video is late, but prefer video keyframe
-                        int ret = avformat_write_header(m_formatContext, nullptr);
-                        if (ret >= 0) {
-                            m_headerWritten = true;
-                            spdlog::info("MKV header written (audio triggered)");
-                        }
-                    }
-                    else if (!task.isVideo && m_startTimestamp == 0) {
-                        m_startTimestamp = task.timestamp;
+                        spdlog::info("MKV header written successfully.");
                     }
 
-                    if (!m_headerWritten) continue; // Drop until header is written
+                    if (!m_headerWritten) {
+                        if (!task.isVideo) m_audioPacketsWritten++; // Count for trigger
+                        continue; // Drop until header is written
+                    }
                 }
 
                 (task.isVideo) ? WriteVideo(task) : WriteAudio(task);
@@ -283,8 +291,16 @@ private:
         memcpy(pkt->data, task.data.data(), task.data.size());
 
         pkt->stream_index = m_videoStream->index;
-        int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
-        pkt->pts = pkt->dts = av_rescale_q(pts_us, { 1, 1000000 }, m_videoStream->time_base);
+        
+        int64_t pts_us = (task.timestamp > m_startTimestamp) ? (int64_t)(task.timestamp - m_startTimestamp) : 0;
+        int64_t pts = av_rescale_q(pts_us, { 1, 1000000 }, m_videoStream->time_base);
+
+        // Ensure monotonic PTS
+        if (m_lastVideoPts != -1 && pts <= m_lastVideoPts) {
+            pts = m_lastVideoPts + 1;
+        }
+        m_lastVideoPts = pts;
+        pkt->pts = pkt->dts = pts;
 
         if (task.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
 
@@ -325,8 +341,16 @@ private:
         memcpy(pkt->data, task.data.data(), task.data.size());
 
         pkt->stream_index = m_audioStream->index;
-        int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
-        pkt->pts = pkt->dts = av_rescale_q(pts_us, { 1, 1000000 }, m_audioStream->time_base);
+        
+        int64_t pts_us = (task.timestamp > m_startTimestamp) ? (int64_t)(task.timestamp - m_startTimestamp) : 0;
+        int64_t pts = av_rescale_q(pts_us, { 1, 1000000 }, m_audioStream->time_base);
+
+        // Ensure monotonic PTS
+        if (m_lastAudioPts != -1 && pts <= m_lastAudioPts) {
+            pts = m_lastAudioPts + 1;
+        }
+        m_lastAudioPts = pts;
+        pkt->pts = pkt->dts = pts;
 
         int channels = m_audioStream->codecpar->ch_layout.nb_channels;
         int bitsPerSample = m_audioStream->codecpar->bits_per_coded_sample;
@@ -366,6 +390,8 @@ private:
     std::condition_variable m_taskAvailable;
     bool m_headerWritten;
     uint64_t m_startTimestamp;
+    int64_t m_lastVideoPts;
+    int64_t m_lastAudioPts;
     std::atomic<uint64_t> m_bytesWritten;
     std::atomic<uint64_t> m_framesWritten;      // FIX: Added stats
     std::atomic<uint64_t> m_audioPacketsWritten; // FIX: Added stats

@@ -468,7 +468,6 @@ private:
             bool gotFrame = false;
 
             if (m_isUSBCapture) {
-                // FIX: Check if capture is still valid
                 if (!m_usbCapture) break;
 
                 gotFrame = m_usbCapture->GetFrame(usbFrame, 50);
@@ -476,11 +475,10 @@ private:
                     frame.texture = usbFrame.texture;
                     frame.timestamp = usbFrame.timestamp;
                     frame.frameIndex = usbFrame.frameIndex;
-                    frame.isKeyframe = (usbFrame.frameIndex % 60 == 0);  // Calculate here since USBFrame doesn't have it
+                    frame.isKeyframe = usbFrame.isKeyframe;
                 }
             }
             else {
-                // FIX: Check if capture is still valid
                 if (!m_frameCapture) break;
 
                 gotFrame = m_frameCapture->GetNextFrame(frame, 50);
@@ -491,7 +489,6 @@ private:
 
             if (!gotFrame || !frame.texture) continue;
 
-            // FIX: Check encoder is valid
             if (!m_encoder || !m_diskWriter) break;
 
             encodedPackets.clear();
@@ -507,8 +504,11 @@ private:
                 }
             }
 
-            // Return texture to pool (only for display capture - USB capture doesn't have ReturnTexture)
-            if (!m_isUSBCapture && m_frameCapture) {
+            // Return texture to pool
+            if (m_isUSBCapture && m_usbCapture) {
+                m_usbCapture->ReturnTexture(usbFrame.texture);
+            }
+            else if (m_frameCapture) {
                 m_frameCapture->ReturnTexture(frame.texture);
             }
         }

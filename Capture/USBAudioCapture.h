@@ -338,12 +338,12 @@ public:
         m_running = false;
         m_packetAvailable.notify_all();
 
-        if (m_captureThread.joinable()) {
-            m_captureThread.join();
-        }
-
         if (m_sourceReader) {
             m_sourceReader->Flush(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
+        }
+
+        if (m_captureThread.joinable()) {
+            m_captureThread.join();
         }
 
         std::lock_guard<std::mutex> lock(m_mutex);

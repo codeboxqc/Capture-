@@ -78,6 +78,57 @@ std::string WStringToString(const std::wstring& wstr) {
     return str;
 }
 
+// Open folder in Windows Explorer
+void OpenOutputFolder() {
+    std::filesystem::path outputPath(g_outputPath);
+    std::filesystem::path folderPath = outputPath.parent_path();
+
+    // Create folder if it doesn't exist
+    if (!std::filesystem::exists(folderPath)) {
+        std::filesystem::create_directories(folderPath);
+    }
+
+    // Open folder in Explorer
+    ShellExecuteW(nullptr, L"open", folderPath.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// Generate unique filename with auto-increment if file exists
+std::string GetUniqueFilename(const std::string& basePath) {
+    std::filesystem::path path(basePath);
+
+    if (!std::filesystem::exists(path)) {
+        return basePath;  // File doesn't exist, use as-is
+    }
+
+    // File exists, need to increment
+    std::filesystem::path parent = path.parent_path();
+    std::string stem = path.stem().string();
+    std::string ext = path.extension().string();
+
+    // Remove existing number suffix if present (e.g., "capture_001" -> "capture")
+    size_t underscorePos = stem.rfind('_');
+    std::string baseStem = stem;
+    if (underscorePos != std::string::npos) {
+        std::string suffix = stem.substr(underscorePos + 1);
+        bool isNumber = !suffix.empty() && std::all_of(suffix.begin(), suffix.end(), ::isdigit);
+        if (isNumber) {
+            baseStem = stem.substr(0, underscorePos);
+        }
+    }
+
+    // Find next available number
+    int counter = 1;
+    std::filesystem::path newPath;
+    do {
+        char numStr[16];
+        snprintf(numStr, sizeof(numStr), "_%03d", counter);
+        newPath = parent / (baseStem + numStr + ext);
+        counter++;
+    } while (std::filesystem::exists(newPath) && counter < 9999);
+
+    return newPath.string();
+}
+
 // Modern Black & Red Theme Setup
 void SetupModernDarkRedTheme() {
     ImGuiStyle& style = ImGui::GetStyle();
@@ -184,14 +235,14 @@ void SetupModernDarkRedTheme() {
     // Drag/Drop
     colors[ImGuiCol_DragDropTarget] = redHover;
 
-    // ============ Modern Style Settings ============
-    style.WindowRounding = 8.0f;
-    style.ChildRounding = 6.0f;
-    style.FrameRounding = 4.0f;
-    style.PopupRounding = 6.0f;
-    style.ScrollbarRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.TabRounding = 6.0f;
+    // ============ Modern Style Settings - Extra Rounded ============
+    style.WindowRounding = 12.0f;
+    style.ChildRounding = 10.0f;
+    style.FrameRounding = 8.0f;
+    style.PopupRounding = 10.0f;
+    style.ScrollbarRounding = 8.0f;
+    style.GrabRounding = 8.0f;
+    style.TabRounding = 10.0f;
 
     style.WindowBorderSize = 1.0f;
     style.ChildBorderSize = 1.0f;
@@ -199,13 +250,14 @@ void SetupModernDarkRedTheme() {
     style.PopupBorderSize = 1.0f;
     style.TabBorderSize = 0.0f;
 
-    style.WindowPadding = ImVec2(12.0f, 12.0f);
-    style.FramePadding = ImVec2(8.0f, 5.0f);
-    style.ItemSpacing = ImVec2(10.0f, 8.0f);
-    style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
-    style.IndentSpacing = 22.0f;
-    style.ScrollbarSize = 14.0f;
-    style.GrabMinSize = 12.0f;
+    // Compact padding for smaller window
+    style.WindowPadding = ImVec2(10.0f, 10.0f);
+    style.FramePadding = ImVec2(6.0f, 4.0f);
+    style.ItemSpacing = ImVec2(8.0f, 6.0f);
+    style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+    style.IndentSpacing = 18.0f;
+    style.ScrollbarSize = 12.0f;
+    style.GrabMinSize = 10.0f;
 
     style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
     style.ButtonTextAlign = ImVec2(0.5f, 0.5f);
@@ -282,7 +334,7 @@ private:
     bool CreateMainWindow(HINSTANCE hInstance, int nCmdShow) {
         WNDCLASSEXW wc = { sizeof(WNDCLASSEXW), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, nullptr, nullptr, nullptr, L"RecordingEngine", nullptr };
         ::RegisterClassExW(&wc);
-        m_hWnd = ::CreateWindowW(wc.lpszClassName, L"GPU Recording Engine - Pro", WS_OVERLAPPEDWINDOW, 100, 100, 1400, 900, nullptr, nullptr, wc.hInstance, nullptr);
+        m_hWnd = ::CreateWindowW(wc.lpszClassName, L"GPU Recording Engine", WS_OVERLAPPEDWINDOW, 100, 100, 820, 620, nullptr, nullptr, wc.hInstance, nullptr);
         return m_hWnd != nullptr;
     }
 
@@ -459,7 +511,7 @@ private:
                     ImGui::Spacing();
 
                     // Large Start/Stop Button
-                    ImVec2 buttonSize(220, 50);
+                    ImVec2 buttonSize(180, 40);
                     if (!g_recording) {
                         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.65f, 0.15f, 1.0f));
                         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.75f, 0.20f, 1.0f));
@@ -568,8 +620,14 @@ private:
                     ImGui::Text("OUTPUT");
                     ImGui::PopStyleColor();
                     ImGui::Spacing();
-                    ImGui::SetNextItemWidth(-1);
+
+                    // Output path with Open Folder button
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 110);
                     ImGui::InputText("##OutputPath", g_outputPath, sizeof(g_outputPath));
+                    ImGui::SameLine();
+                    if (ImGui::Button("Open Folder", ImVec2(100, 0))) {
+                        OpenOutputFolder();
+                    }
 
                     ImGui::EndTabItem();
                 }
@@ -643,7 +701,6 @@ private:
                 // --- TAB 3: HARDWARE SELECTION ---
                 if (ImGui::BeginTabItem("  Hardware  ")) {
                     ImGui::Spacing();
-                    ImGui::Spacing();
 
                     // GPU Selection
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
@@ -651,7 +708,7 @@ private:
                     ImGui::PopStyleColor();
                     ImGui::Spacing();
 
-                    if (ImGui::BeginListBox("##GPUs", ImVec2(-1, 100))) {
+                    if (ImGui::BeginListBox("##GPUs", ImVec2(-1, 60))) {
                         for (size_t i = 0; i < g_availableGPUs.size(); i++) {
                             const bool isSelected = (m_selectedGPU == (int)i);
                             std::string gpuLabel = WStringToString(g_availableGPUs[i].name) + " (Score: " + std::to_string((int)g_availableGPUs[i].performanceScore) + ")";
@@ -670,7 +727,7 @@ private:
                     ImGui::PopStyleColor();
                     ImGui::Spacing();
 
-                    if (ImGui::BeginListBox("##Displays", ImVec2(-1, 100))) {
+                    if (ImGui::BeginListBox("##Displays", ImVec2(-1, 60))) {
                         for (size_t i = 0; i < m_displayNames.size(); i++) {
                             const bool isSelected = (m_selectedDisplay == (int)i);
                             if (ImGui::Selectable(m_displayNames[i].c_str(), isSelected)) m_selectedDisplay = i;
@@ -689,7 +746,7 @@ private:
                     ImGui::Spacing();
 
                     if (!m_usbDeviceNames.empty()) {
-                        if (ImGui::BeginListBox("##USBDevices", ImVec2(-1, 100))) {
+                        if (ImGui::BeginListBox("##USBDevices", ImVec2(-1, 60))) {
                             for (size_t i = 0; i < m_usbDeviceNames.size(); i++) {
                                 const bool isSelected = (m_selectedUSBDevice == (int)i);
                                 if (ImGui::Selectable(m_usbDeviceNames[i].c_str(), isSelected)) m_selectedUSBDevice = i;
@@ -823,22 +880,35 @@ private:
     void StartRecording() {
         if (!g_engine) return;
 
-        // Auto-correct the file extension based on the selected codec so players like VLC can read the file natively!
+        // Auto-correct the file extension based on the selected codec
         std::string currentPath = g_outputPath;
         size_t dotPos = currentPath.find_last_of('.');
         std::string basePath = (dotPos != std::string::npos) ? currentPath.substr(0, dotPos) : currentPath;
 
+        // Set extension based on codec
+        std::string ext = ".mkv";  // Default MKV container
         if (m_currentCodec == 0) {
             g_settings.codec = Codec::H264;
-            currentPath = basePath + ".h264";
+            ext = ".mkv";
         }
         else if (m_currentCodec == 1) {
             g_settings.codec = Codec::H265;
-            currentPath = basePath + ".hevc";
+            ext = ".mkv";
         }
         else {
             g_settings.codec = Codec::AV1;
-            currentPath = basePath + ".av1";
+            ext = ".mkv";
+        }
+
+        currentPath = basePath + ext;
+
+        // AUTO-INCREMENT: Get unique filename if file already exists
+        currentPath = GetUniqueFilename(currentPath);
+
+        // Create output directory if it doesn't exist
+        std::filesystem::path outputDir = std::filesystem::path(currentPath).parent_path();
+        if (!outputDir.empty() && !std::filesystem::exists(outputDir)) {
+            std::filesystem::create_directories(outputDir);
         }
 
         strcpy_s(g_outputPath, sizeof(g_outputPath), currentPath.c_str());
