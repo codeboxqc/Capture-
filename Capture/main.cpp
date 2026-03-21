@@ -12,6 +12,7 @@
 #include <sstream>
 #include <mutex>
 #include <thread>
+#include <atomic>
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -31,7 +32,7 @@ std::shared_ptr<IRecordingEngine> g_engine;
 std::mutex g_engineMutex;
 RecordingSettings g_settings;
 std::vector<ExtendedGPUInfo> g_availableGPUs;
-bool g_recording = false;
+std::atomic<bool> g_recording = false;
 bool g_showSettings = true;
 PerformanceMetrics g_metrics;
 std::string g_statusMessage = "Ready";
@@ -929,6 +930,11 @@ private:
             engine = g_engine;
         }
         if (!engine) return;
+
+        // Sync current UI selections to settings
+        g_settings.gpuIndex = m_selectedGPU;
+        g_settings.displayIndex = m_selectedDisplay;
+        g_settings.usbDeviceIndex = m_selectedUSBDevice;
 
         std::filesystem::path outputPath(g_outputPath);
         std::filesystem::path folderPath = outputPath.parent_path();

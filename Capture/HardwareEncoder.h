@@ -118,8 +118,9 @@ public:
 
         m_useSystemMemory = (gpuInfo.encoderType == EncoderType::INTEL_QSV || gpuInfo.encoderType == EncoderType::SOFTWARE);
 
+    retry_init:
         // Determine pixel format BEFORE context initialization to avoid mismatch
-        if (gpuInfo.encoderType == EncoderType::SOFTWARE) {
+        if (m_useSystemMemory) {
             m_codecContext->pix_fmt = AV_PIX_FMT_YUV444P;
         }
         else if (gpuInfo.encoderType == EncoderType::NVIDIA_NVENC) {
@@ -131,9 +132,18 @@ public:
 
         if (!m_useSystemMemory) {
             if (!InitializeHardwareContext(settings, gpuInfo.encoderType)) {
-                spdlog::error("Failed to initialize hardware context");
-                Cleanup();
-                return false;
+                spdlog::warn("Hardware context init failed, falling back to software");
+                m_useSystemMemory = true;
+
+                // Reset context for software fallback
+                avcodec_free_context(&m_codecContext);
+                if (settings.codec == Codec::H265) codec = avcodec_find_encoder(AV_CODEC_ID_HEVC);
+                else if (settings.codec == Codec::AV1) codec = avcodec_find_encoder(AV_CODEC_ID_AV1);
+                else codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+
+                if (!codec) return false;
+                m_codecContext = avcodec_alloc_context3(codec);
+                goto retry_init;
             }
         }
         else {

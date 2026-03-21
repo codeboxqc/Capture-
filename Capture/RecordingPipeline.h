@@ -361,10 +361,54 @@ private:
         SaveRawRgbaToPngStatic(bgraData, width, height, stride, path);
     }
 
+    static void SaveRawBgraToBmp(const uint8_t* bgraData, uint32_t width, uint32_t height, uint32_t stride, const std::string& path) {
+        std::ofstream ofs(path, std::ios::binary);
+        if (!ofs) return;
+
+#pragma pack(push, 1)
+        struct {
+            uint16_t type{ 0x4D42 };
+            uint32_t size;
+            uint16_t res1{ 0 }, res2{ 0 };
+            uint32_t offBits{ 54 };
+            uint32_t biSize{ 40 };
+            int32_t width;
+            int32_t height;
+            uint16_t planes{ 1 };
+            uint16_t bitCount{ 24 };
+            uint32_t compression{ 0 };
+            uint32_t sizeImage{ 0 };
+            int32_t xPels{ 0 }, yPels{ 0 };
+            uint32_t clrUsed{ 0 }, clrImp{ 0 };
+        } bmp;
+#pragma pack(pop)
+
+        uint32_t rowSize = (width * 3 + 3) & ~3;
+        bmp.width = width;
+        bmp.height = -static_cast<int32_t>(height);
+        bmp.size = 54 + rowSize * height;
+
+        ofs.write(reinterpret_cast<const char*>(&bmp), 54);
+        std::vector<uint8_t> row(rowSize, 0);
+        for (uint32_t y = 0; y < height; y++) {
+            const uint8_t* src = bgraData + y * stride;
+            for (uint32_t x = 0; x < width; x++) {
+                row[x * 3 + 0] = src[x * 4 + 0]; // B
+                row[x * 3 + 1] = src[x * 4 + 1]; // G
+                row[x * 3 + 2] = src[x * 4 + 2]; // R
+            }
+            ofs.write(reinterpret_cast<const char*>(row.data()), rowSize);
+        }
+        spdlog::info("Screenshot saved as BMP (Perfect Quality): {}", path);
+    }
+
     static void SaveRawRgbaToPngStatic(const uint8_t* bgraData, uint32_t width, uint32_t height, uint32_t stride, const std::string& path) {
         const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_PNG);
         if (!codec) {
-            spdlog::error("PNG encoder not found");
+            spdlog::warn("PNG encoder not found, falling back to BMP for perfect quality");
+            std::string bmpPath = path;
+            if (bmpPath.size() > 4) bmpPath.replace(bmpPath.size() - 3, 3, "bmp");
+            SaveRawBgraToBmp(bgraData, width, height, stride, bmpPath);
             return;
         }
 
@@ -373,7 +417,7 @@ private:
 
         c->width = width;
         c->height = height;
-        c->pix_fmt = AV_PIX_FMT_RGB24; // Better compatibility for PNG
+        c->pix_fmt = AV_PIX_FMT_RGB24;
         c->time_base = { 1, 1 };
 
         if (avcodec_open2(c, codec, nullptr) < 0) {
@@ -392,7 +436,6 @@ private:
             return;
         }
 
-        // Use sws_scale to convert BGRA to RGB24 correctly
         SwsContext* sws = sws_getContext(width, height, AV_PIX_FMT_BGRA,
                                        width, height, AV_PIX_FMT_RGB24,
                                        SWS_LANCZOS, nullptr, nullptr, nullptr);
@@ -407,11 +450,13 @@ private:
         AVPacket* pkt = av_packet_alloc();
         if (avcodec_send_frame(c, frame) >= 0) {
             std::ofstream ofs(path, std::ios::binary);
-            while (avcodec_receive_packet(c, pkt) >= 0) {
-                if (ofs) {
+            if (ofs) {
+                while (avcodec_receive_packet(c, pkt) >= 0) {
                     ofs.write(reinterpret_cast<char*>(pkt->data), pkt->size);
+                    av_packet_unref(pkt);
                 }
-                av_packet_unref(pkt);
+                ofs.close();
+                spdlog::info("Screenshot saved as PNG: {}", path);
             }
         }
 
@@ -419,8 +464,6 @@ private:
         av_freep(&frame->data[0]);
         av_frame_free(&frame);
         avcodec_free_context(&c);
-
-        spdlog::info("Screenshot saved successfully to {}", path);
     }
     bool StartUSBRecording(const RecordingSettings& settings) {
         try {
