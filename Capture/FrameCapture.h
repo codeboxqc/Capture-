@@ -12,16 +12,15 @@ struct CapturedFrame {
 
 class FrameCapture {
 public:
-    FrameCapture()
+    FrameCapture() 
         : m_running(false)
         , m_frameCount(0)          // FIX: Explicitly initialize
         , m_needsStaging(false)
         , m_targetFPS(60)
         , m_ringBufferSize(8)
         , m_droppedFrames(0)       // FIX: Track dropped frames
-    {
-    }
-
+    {}
+    
     ~FrameCapture() { StopCapture(); }
 
     bool Initialize(bool needsStaging, ComPtr<ID3D12Device> d3d12Device, const ExtendedGPUInfo& gpuInfo,
@@ -53,14 +52,14 @@ public:
 
     void StopCapture() {
         m_running = false;
-
+        
         // FIX: Wake up any waiting threads
         m_frameAvailable.notify_all();
-
+        
         if (m_captureThread.joinable()) {
             m_captureThread.join();
         }
-
+        
         // FIX: Clear buffers safely
         {
             std::lock_guard<std::mutex> lock(m_bufferMutex);
@@ -70,7 +69,7 @@ public:
             std::lock_guard<std::mutex> lock(m_texturePoolMutex);
             while (!m_texturePool.empty()) m_texturePool.pop();
         }
-
+        
         if (m_droppedFrames > 0) {
             spdlog::warn("Total frames dropped during capture: {}", m_droppedFrames.load());
         }
@@ -100,7 +99,7 @@ public:
         return std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::high_resolution_clock::now().time_since_epoch()).count();
     }
-
+    
     // FIX: Added stats getters
     uint64_t GetFrameCount() const { return m_frameCount.load(); }
     uint64_t GetDroppedFrames() const { return m_droppedFrames.load(); }
@@ -119,7 +118,7 @@ private:
         // --- HIGH PRECISION FRAMERATE LIMITER ---
         auto frameDuration = std::chrono::microseconds(1000000 / (m_targetFPS > 0 ? m_targetFPS : 60));
         auto nextFrameTime = std::chrono::steady_clock::now();
-
+        
         // FIX: Calculate keyframe interval (every 2 seconds)
         const uint32_t keyframeInterval = m_targetFPS * 2;
 
@@ -147,7 +146,7 @@ private:
                     spdlog::warn("Desktop duplication lost, attempting recovery...");
                     duplication.Reset();
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
+                    
                     hr = InitializeDesktopDuplication(&duplication);
                     if (SUCCEEDED(hr)) {
                         spdlog::info("Desktop duplication recovered");
@@ -169,7 +168,7 @@ private:
                 sourceTexture->GetDesc(&srcDesc);
 
                 ComPtr<ID3D11Texture2D> destTexture = GetRingBufferTexture(srcDesc.Width, srcDesc.Height, srcDesc.Format);
-
+                
                 // FIX: Check texture allocation
                 if (!destTexture) {
                     spdlog::error("Failed to allocate ring buffer texture");
@@ -200,27 +199,27 @@ private:
                     }
                     m_ringBuffer.push(frame);
                 }
-
+                
                 // Return texture OUTSIDE the lock
                 if (textureToReturn) {
                     ReturnTexture(textureToReturn);
                 }
-
+                
                 m_frameAvailable.notify_one();
             }
-
+            
             duplication->ReleaseFrame();
         }
-
+        
         // FIX: Removed duplicate ReleaseFrame call (was causing potential crash)
-        spdlog::info("Frame capture thread stopped. Captured: {}, Dropped: {}",
+        spdlog::info("Frame capture thread stopped. Captured: {}, Dropped: {}", 
             m_frameCount.load(), m_droppedFrames.load());
     }
 
     HRESULT InitializeDesktopDuplication(IDXGIOutputDuplication** duplication) {
         if (!m_targetOutput) return E_INVALIDARG;
         if (!duplication) return E_POINTER;  // FIX: Null check
-
+        
         ComPtr<IDXGIOutput1> output1;
         HRESULT hr = m_targetOutput.As(&output1);
         if (FAILED(hr)) return hr;
@@ -264,7 +263,7 @@ private:
         std::lock_guard<std::mutex> lock(m_texturePoolMutex);
         if (!m_texturePool.empty()) {
             auto texture = m_texturePool.front();
-
+            
             // FIX: Null check before use
             if (texture) {
                 D3D11_TEXTURE2D_DESC desc;
@@ -275,7 +274,7 @@ private:
                     return texture;
                 }
             }
-
+            
             // Size changed, clear pool
             while (!m_texturePool.empty()) m_texturePool.pop();
         }

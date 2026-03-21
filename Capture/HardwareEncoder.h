@@ -16,7 +16,7 @@ struct EncodedPacket {
 
 class HardwareEncoder {
 public:
-    HardwareEncoder()
+    HardwareEncoder() 
         : m_codecContext(nullptr)
         , m_packet(nullptr)
         , m_hwDeviceCtx(nullptr)
@@ -26,8 +26,7 @@ public:
         , m_frameCount(0)
         , m_encodedFrames(0)
         , m_keyframeInterval(60)
-    {
-    }
+    {}
 
     ~HardwareEncoder() {
         Cleanup();
@@ -172,10 +171,10 @@ public:
 
         m_frameCount = 0;
         m_encodedFrames = 0;
-
-        spdlog::info("HardwareEncoder initialized: {}x{} @ {} fps, GOP: {}",
+        
+        spdlog::info("HardwareEncoder initialized: {}x{} @ {} fps, GOP: {}", 
             settings.width, settings.height, settings.fps, m_codecContext->gop_size);
-
+        
         return true;
     }
 
@@ -184,7 +183,7 @@ public:
             spdlog::error("Encoder not initialized");
             return false;
         }
-
+        
         if (!frame.texture) {
             spdlog::warn("Frame texture is null");
             return false;
@@ -215,8 +214,7 @@ public:
         // FIX: Properly request keyframe (pict_type only - key_frame removed in newer FFmpeg)
         if (frame.isKeyframe || (m_frameCount % m_keyframeInterval == 0)) {
             avFrame->pict_type = AV_PICTURE_TYPE_I;
-        }
-        else {
+        } else {
             avFrame->pict_type = AV_PICTURE_TYPE_NONE;  // Let encoder decide
         }
 
@@ -227,8 +225,7 @@ public:
             if (ret == AVERROR(EAGAIN)) {
                 // Encoder needs to output packets first
                 spdlog::debug("Encoder buffer full, draining...");
-            }
-            else {
+            } else {
                 char errBuf[AV_ERROR_MAX_STRING_SIZE];
                 av_strerror(ret, errBuf, sizeof(errBuf));
                 spdlog::error("Failed to send frame: {}", errBuf);
@@ -257,7 +254,7 @@ public:
 
             outPackets.push_back(std::move(ep));
             m_encodedFrames++;
-
+            
             av_packet_unref(m_packet);
         }
 
@@ -287,24 +284,24 @@ public:
 
             outPackets.push_back(std::move(ep));
             m_encodedFrames++;
-
+            
             av_packet_unref(m_packet);
         }
-
-        spdlog::info("Encoder flushed. Total frames: {}, Encoded packets: {}",
+        
+        spdlog::info("Encoder flushed. Total frames: {}, Encoded packets: {}", 
             m_frameCount, m_encodedFrames.load());
     }
 
     std::vector<uint8_t> GetExtradata() const {
         if (!m_codecContext) return {};
         if (!m_codecContext->extradata || m_codecContext->extradata_size <= 0) return {};
-
+        
         return std::vector<uint8_t>(
-            m_codecContext->extradata,
+            m_codecContext->extradata, 
             m_codecContext->extradata + m_codecContext->extradata_size
         );
     }
-
+    
     // FIX: Added stats getters
     uint64_t GetFrameCount() const { return m_frameCount; }
     uint64_t GetEncodedFrames() const { return m_encodedFrames.load(); }
@@ -316,27 +313,27 @@ private:
             sws_freeContext(m_swsContext);
             m_swsContext = nullptr;
         }
-
+        
         if (m_packet) {
             av_packet_free(&m_packet);
             m_packet = nullptr;
         }
-
+        
         if (m_codecContext) {
             avcodec_free_context(&m_codecContext);
             m_codecContext = nullptr;
         }
-
+        
         if (m_hwFramesCtx) {
             av_buffer_unref(&m_hwFramesCtx);
             m_hwFramesCtx = nullptr;
         }
-
+        
         if (m_hwDeviceCtx) {
             av_buffer_unref(&m_hwDeviceCtx);
             m_hwDeviceCtx = nullptr;
         }
-
+        
         m_stagingTexture.Reset();
     }
 
@@ -389,7 +386,7 @@ private:
             spdlog::error("Failed to reference hardware frames context");
             return false;
         }
-
+        
         m_codecContext->pix_fmt = AV_PIX_FMT_D3D11;
         m_codecContext->sw_pix_fmt = AV_PIX_FMT_BGRA;
 
@@ -509,7 +506,7 @@ private:
         int inLinesize[1] = { static_cast<int>(mapped.RowPitch) };
 
         sws_scale(m_swsContext, inData, inLinesize, 0, m_codecContext->height, avFrame->data, avFrame->linesize);
-
+        
         m_d3d11Context->Unmap(m_stagingTexture.Get(), 0);
 
         return true;
@@ -517,13 +514,13 @@ private:
 
     bool PrepareHardwareFrame(const CapturedFrame& frame, AVFrame* avFrame) {
         avFrame->format = AV_PIX_FMT_D3D11;
-
+        
         // FIX: Check hw_frames_ctx before referencing
         if (!m_hwFramesCtx) {
             spdlog::error("Hardware frames context is null");
             return false;
         }
-
+        
         avFrame->hw_frames_ctx = av_buffer_ref(m_hwFramesCtx);
         if (!avFrame->hw_frames_ctx) {
             spdlog::error("Failed to reference hardware frames context");

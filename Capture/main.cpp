@@ -82,12 +82,12 @@ std::string WStringToString(const std::wstring& wstr) {
 void OpenOutputFolder() {
     std::filesystem::path outputPath(g_outputPath);
     std::filesystem::path folderPath = outputPath.parent_path();
-
+    
     // Create folder if it doesn't exist
     if (!std::filesystem::exists(folderPath)) {
         std::filesystem::create_directories(folderPath);
     }
-
+    
     // Open folder in Explorer
     ShellExecuteW(nullptr, L"open", folderPath.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
@@ -95,16 +95,16 @@ void OpenOutputFolder() {
 // Generate unique filename with auto-increment if file exists
 std::string GetUniqueFilename(const std::string& basePath) {
     std::filesystem::path path(basePath);
-
+    
     if (!std::filesystem::exists(path)) {
         return basePath;  // File doesn't exist, use as-is
     }
-
+    
     // File exists, need to increment
     std::filesystem::path parent = path.parent_path();
     std::string stem = path.stem().string();
     std::string ext = path.extension().string();
-
+    
     // Remove existing number suffix if present (e.g., "capture_001" -> "capture")
     size_t underscorePos = stem.rfind('_');
     std::string baseStem = stem;
@@ -115,7 +115,7 @@ std::string GetUniqueFilename(const std::string& basePath) {
             baseStem = stem.substr(0, underscorePos);
         }
     }
-
+    
     // Find next available number
     int counter = 1;
     std::filesystem::path newPath;
@@ -125,7 +125,7 @@ std::string GetUniqueFilename(const std::string& basePath) {
         newPath = parent / (baseStem + numStr + ext);
         counter++;
     } while (std::filesystem::exists(newPath) && counter < 9999);
-
+    
     return newPath.string();
 }
 
@@ -620,7 +620,7 @@ private:
                     ImGui::Text("OUTPUT");
                     ImGui::PopStyleColor();
                     ImGui::Spacing();
-
+                    
                     // Output path with Open Folder button
                     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 110);
                     ImGui::InputText("##OutputPath", g_outputPath, sizeof(g_outputPath));
@@ -899,7 +899,7 @@ private:
             g_settings.codec = Codec::AV1;
             ext = ".mkv";
         }
-
+        
         currentPath = basePath + ext;
 
         // AUTO-INCREMENT: Get unique filename if file already exists

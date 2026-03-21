@@ -12,7 +12,7 @@ public:
         // FIX: Try DXGI 1.6 first, fall back to 1.1 for older systems
         ComPtr<IDXGIFactory6> factory6;
         ComPtr<IDXGIFactory1> factory1;
-
+        
         HRESULT hr = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory6));
         if (FAILED(hr)) {
             // Fallback for older Windows versions
@@ -24,33 +24,32 @@ public:
         }
 
         UINT adapterIndex = 0;
-
+        
         while (true) {
             ComPtr<IDXGIAdapter1> adapter1;
             ComPtr<IDXGIAdapter4> adapter4;
-
+            
             // Try to get adapter
             if (factory6) {
                 // Use GPU preference API (Windows 10 1803+)
                 hr = factory6->EnumAdapterByGpuPreference(
-                    adapterIndex,
+                    adapterIndex, 
                     DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
                     IID_PPV_ARGS(&adapter4));
-            }
-            else {
+            } else {
                 // Fallback enumeration
                 hr = factory1->EnumAdapters1(adapterIndex, &adapter1);
             }
-
+            
             if (hr == DXGI_ERROR_NOT_FOUND) {
                 break;  // No more adapters
             }
-
+            
             if (FAILED(hr)) {
                 adapterIndex++;
                 continue;
             }
-
+            
             // FIX: Initialize all fields to safe defaults
             ExtendedGPUInfo info = {};
             info.encoderType = EncoderType::SOFTWARE;
@@ -60,10 +59,10 @@ public:
             info.sharedSystemMemory = 0;
             info.performanceScore = 0.0;
             info.capabilities = {};  // Zero-initialize capabilities
-
+            
             bool gotDesc = false;
             DXGI_ADAPTER_DESC1 desc1 = {};
-
+            
             if (adapter4) {
                 DXGI_ADAPTER_DESC3 desc3;
                 if (SUCCEEDED(adapter4->GetDesc3(&desc3))) {
@@ -77,8 +76,7 @@ public:
                     desc1.Flags = desc3.Flags;
                     gotDesc = true;
                 }
-            }
-            else if (adapter1) {
+            } else if (adapter1) {
                 if (SUCCEEDED(adapter1->GetDesc1(&desc1))) {
                     info.name = desc1.Description;
                     info.vendorId = std::to_wstring(desc1.VendorId);
@@ -88,19 +86,19 @@ public:
                     gotDesc = true;
                 }
             }
-
+            
             if (!gotDesc) {
                 adapterIndex++;
                 continue;
             }
-
+            
             // FIX: Skip software adapters (like Microsoft Basic Render Driver)
             if (desc1.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
                 spdlog::debug("Skipping software adapter: {}", WStringToString(info.name));
                 adapterIndex++;
                 continue;
             }
-
+            
             // Detect vendor and capabilities
             if (desc1.VendorId == 0x10DE) {
                 info.encoderType = EncoderType::NVIDIA_NVENC;
@@ -120,25 +118,25 @@ public:
             }
 
             // Check HDR support
-            IDXGIAdapter* baseAdapter = adapter4 ? static_cast<IDXGIAdapter*>(adapter4.Get())
-                : static_cast<IDXGIAdapter*>(adapter1.Get());
+            IDXGIAdapter* baseAdapter = adapter4 ? static_cast<IDXGIAdapter*>(adapter4.Get()) 
+                                                  : static_cast<IDXGIAdapter*>(adapter1.Get());
             info.capabilities.supportsHDR = CheckHDRSupport(baseAdapter);
             info.supportsHDR = info.capabilities.supportsHDR;
-
+            
             // Calculate performance score
             info.performanceScore = CalculatePerformanceScore(info);
 
             spdlog::info("Detected GPU: {} (Score: {:.1f})", WStringToString(info.name), info.performanceScore);
             gpus.push_back(info);
-
+            
             adapterIndex++;
         }
 
         // Sort by performance score (highest first)
-        std::sort(gpus.begin(), gpus.end(), [](const ExtendedGPUInfo& a, const ExtendedGPUInfo& b) {
-            return a.performanceScore > b.performanceScore;
-            });
-
+        std::sort(gpus.begin(), gpus.end(), [](const ExtendedGPUInfo& a, const ExtendedGPUInfo& b) { 
+            return a.performanceScore > b.performanceScore; 
+        });
+        
         spdlog::info("Total GPUs detected: {}", gpus.size());
         return gpus;
     }
@@ -151,7 +149,7 @@ public:
         }
         return gpus[0];
     }
-
+    
     // FIX: Added safe version that doesn't throw
     bool TryGetOptimalGPU(ExtendedGPUInfo& outGPU) {
         auto gpus = DetectGPUs();
@@ -180,7 +178,7 @@ public:
         }
         return gpus[index];
     }
-
+    
     // FIX: Added safe version that doesn't throw
     bool TryGetGPUByIndex(size_t index, ExtendedGPUInfo& outGPU) {
         auto gpus = DetectGPUs();
@@ -208,10 +206,10 @@ private:
         // RTX 20 series (Turing): 0x1E00 - 0x21FF
         // GTX 16 series (Turing): 0x2180 - 0x21FF
         // GTX 10 series (Pascal): 0x1B00 - 0x1DFF
-
+        
         // FIX: More accurate AV1 detection (RTX 40 series and newer)
         info.supportsAV1 = (deviceId >= 0x2600 && deviceId <= 0x28FF);
-
+        
         info.capabilities.supportsH264Encode = true;
         info.capabilities.supportsH265Encode = true;
         info.capabilities.supportsH264Decode = true;
@@ -221,7 +219,7 @@ private:
         info.capabilities.supportsHardwareAcceleration = true;
         info.capabilities.maxFramerate = 240;
         info.capabilities.maxEncodedResolution = 8192;
-
+        
         // Turing and newer support low latency
         info.capabilities.supportsLowLatency = (deviceId >= 0x1E00);
     }
@@ -231,10 +229,10 @@ private:
         // RX 7000 series (RDNA3): 0x7400 - 0x74FF (AV1 encode support)
         // RX 6000 series (RDNA2): 0x73A0 - 0x73FF (AV1 decode only)
         // RX 5000 series (RDNA1): 0x7310 - 0x739F
-
+        
         // FIX: More accurate AV1 detection
         info.supportsAV1 = (deviceId >= 0x7400 && deviceId <= 0x74FF);
-
+        
         info.capabilities.supportsH264Encode = true;
         info.capabilities.supportsH265Encode = true;
         info.capabilities.supportsH264Decode = true;   // FIX: Added decode
@@ -252,10 +250,10 @@ private:
         // Arc A-series (Alchemist): 0x5690 - 0x56FF (AV1 encode support)
         // Iris Xe (Gen12): 0x9A40 - 0x9AFF
         // UHD (Gen11): 0x8A00 - 0x8AFF
-
+        
         // FIX: More accurate AV1 detection (Arc GPUs)
         info.supportsAV1 = (deviceId >= 0x5690 && deviceId <= 0x56FF);
-
+        
         info.capabilities.supportsH264Encode = true;
         info.capabilities.supportsH265Encode = true;
         info.capabilities.supportsH264Decode = true;   // FIX: Added decode
@@ -270,12 +268,12 @@ private:
 
     bool CheckHDRSupport(IDXGIAdapter* adapter) {
         if (!adapter) return false;
-
+        
         ComPtr<IDXGIOutput> output;
         if (FAILED(adapter->EnumOutputs(0, &output))) {
             return false;
         }
-
+        
         // FIX: Use IDXGIOutput6 for proper HDR detection
         ComPtr<IDXGIOutput6> output6;
         if (SUCCEEDED(output.As(&output6))) {
@@ -283,8 +281,8 @@ private:
             if (SUCCEEDED(output6->GetDesc1(&desc1))) {
                 // Check color space support
                 bool supportsHDR = (desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ||
-                    desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
-
+                                    desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
+                
                 // Also check bits per color
                 if (desc1.BitsPerColor >= 10) {
                     return supportsHDR || true;  // 10-bit display likely supports HDR
@@ -292,7 +290,7 @@ private:
                 return supportsHDR;
             }
         }
-
+        
         // Fallback: check if display is at least capable
         DXGI_OUTPUT_DESC desc;
         if (SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor) {
@@ -304,35 +302,35 @@ private:
                 return (colorDepth >= 30);  // 10-bit per channel
             }
         }
-
+        
         return false;
     }
 
     double CalculatePerformanceScore(const ExtendedGPUInfo& gpu) {
         double score = 0.0;
-
+        
         // VRAM score (capped at 16GB)
         double dedicatedVRAM_GB = gpu.dedicatedVideoMemory / (1024.0 * 1024.0 * 1024.0);
         score += std::min(dedicatedVRAM_GB, 16.0) * 8.0;  // Max 128 points
-
+        
         // Encoder support
         score += gpu.capabilities.supportsH264Encode ? 5.0 : 0.0;
         score += gpu.capabilities.supportsH265Encode ? 15.0 : 0.0;
         score += gpu.capabilities.supportsAV1Encode ? 25.0 : 0.0;
-
+        
         // Hardware acceleration bonus
         score += gpu.capabilities.supportsHardwareAcceleration ? 30.0 : 0.0;
-
+        
         // Low latency bonus
         score += gpu.capabilities.supportsLowLatency ? 10.0 : 0.0;
-
+        
         // HDR bonus
         score += gpu.capabilities.supportsHDR ? 5.0 : 0.0;
-
+        
         // High framerate bonus
         if (gpu.capabilities.maxFramerate >= 240) score += 10.0;
         else if (gpu.capabilities.maxFramerate >= 120) score += 5.0;
-
+        
         return score;
     }
 };

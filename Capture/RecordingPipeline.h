@@ -76,7 +76,7 @@ public:
         if (!m_recording) return;
 
         spdlog::info("Stopping recording...");
-
+        
         // FIX: Set flag first to stop all loops
         m_recording = false;
 
@@ -84,13 +84,13 @@ public:
         // This prevents accessing freed memory
         spdlog::info("Waiting for processing thread...");
         if (m_processThread.joinable()) m_processThread.join();
-
+        
         spdlog::info("Waiting for sync thread...");
         if (m_syncThread.joinable()) m_syncThread.join();
-
+        
         spdlog::info("Waiting for audio thread...");
         if (m_audioThread.joinable()) m_audioThread.join();
-
+        
         // FIX: Wait for USB audio thread too
         spdlog::info("Waiting for USB audio thread...");
         if (m_usbAudioThread.joinable()) m_usbAudioThread.join();
@@ -466,10 +466,10 @@ private:
 
         while (m_recording) {
             bool gotFrame = false;
-
+            
             if (m_isUSBCapture) {
                 if (!m_usbCapture) break;
-
+                
                 gotFrame = m_usbCapture->GetFrame(usbFrame, 50);
                 if (gotFrame && usbFrame.texture) {
                     frame.texture = usbFrame.texture;
@@ -480,7 +480,7 @@ private:
             }
             else {
                 if (!m_frameCapture) break;
-
+                
                 gotFrame = m_frameCapture->GetNextFrame(frame, 50);
                 if (gotFrame) {
                     frame.isKeyframe = (frame.frameIndex % 60 == 0);
@@ -507,8 +507,7 @@ private:
             // Return texture to pool
             if (m_isUSBCapture && m_usbCapture) {
                 m_usbCapture->ReturnTexture(usbFrame.texture);
-            }
-            else if (m_frameCapture) {
+            } else if (m_frameCapture) {
                 m_frameCapture->ReturnTexture(frame.texture);
             }
         }

@@ -129,17 +129,17 @@ public:
 
     void StopCapture() {
         m_running = false;
-
+        
         // FIX: Wake up any waiting threads
         m_packetAvailable.notify_all();
-
+        
         if (m_captureThread.joinable()) {
             m_captureThread.join();
         }
         if (m_audioClient) {
             m_audioClient->Stop();
         }
-
+        
         // FIX: Clear queue to free memory
         {
             std::lock_guard<std::mutex> lock(m_packetMutex);
