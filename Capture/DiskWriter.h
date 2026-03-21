@@ -227,7 +227,7 @@ public:
         std::lock_guard<std::mutex> lock(m_queueMutex);
         
         // FIX: Warn if queue is getting too large (potential bottleneck)
-        if (m_taskQueue.size() > 500) {
+        if (m_taskQueue.size() > 1000) {
             static uint64_t lastWarnTime = 0;
             uint64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -317,7 +317,9 @@ private:
 
         if (task.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
 
-        ret = av_interleaved_write_frame(m_formatContext, pkt);
+        // Use standard write_frame for video as packets are already in order.
+        // This reduces overhead compared to interleaved_write_frame.
+        ret = av_write_frame(m_formatContext, pkt);
         if (ret < 0) {
             // FIX: Don't spam logs, just count errors
             static std::atomic<uint64_t> videoWriteErrors{0};

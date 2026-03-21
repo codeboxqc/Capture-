@@ -909,6 +909,7 @@ private:
 
                 if (m_captureStagingTexture) {
                     m_captureD3D11Context->CopyResource(m_captureStagingTexture.Get(), frame.texture.Get());
+                    m_captureD3D11Context->Flush(); // Ensure copy is finished before mapping
 
                     D3D11_MAPPED_SUBRESOURCE mapped;
                     HRESULT hr = m_captureD3D11Context->Map(m_captureStagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);

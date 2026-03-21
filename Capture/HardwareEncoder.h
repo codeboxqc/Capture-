@@ -124,7 +124,8 @@ public:
         m_codecContext->height = settings.height;
         m_codecContext->time_base = { 1, 1000000 }; // Internal microsecond timebase
         m_codecContext->framerate = { static_cast<int>(settings.fps), 1 };
-        m_codecContext->gop_size = static_cast<int>(settings.fps * 2);
+        // Shorter GOP (1 second) for better seeking and recovery
+        m_codecContext->gop_size = static_cast<int>(settings.fps);
         m_codecContext->max_b_frames = 0;
         m_codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         m_keyframeInterval = m_codecContext->gop_size;
@@ -531,8 +532,16 @@ private:
             // FIX: Force IDR frames for keyframes to ensure seekability
             ret |= av_opt_set(m_codecContext->priv_data, "forced-idr", "1", 0);
 
+            // Set IDR period explicitly
+            std::string gopStr = std::to_string(m_codecContext->gop_size);
+            ret |= av_opt_set(m_codecContext->priv_data, "idr_period", gopStr.c_str(), 0);
+
             // Repeat headers for robustness (SPS/PPS in every IDR)
             ret |= av_opt_set(m_codecContext->priv_data, "repeat-headers", "1", 0);
+
+            // Enable AQ for better quality
+            ret |= av_opt_set(m_codecContext->priv_data, "spatial-aq", "1", 0);
+            ret |= av_opt_set(m_codecContext->priv_data, "temporal-aq", "1", 0);
 
             // Disable B-frames for low latency and consistent timestamps
             m_codecContext->max_b_frames = 0;
@@ -623,6 +632,7 @@ private:
         }
 
         m_d3d11Context->CopySubresourceRegion(dstTex, dstSubresource, 0, 0, 0, srcTex, 0, nullptr);
+        m_d3d11Context->Flush(); // Ensure hardware copy is complete before encoding starts
 
         return true;
     }
