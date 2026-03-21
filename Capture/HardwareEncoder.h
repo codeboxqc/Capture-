@@ -479,12 +479,10 @@ private:
             ret |= av_opt_set_int(m_codecContext->priv_data, "qp", targetQuality, 0);
 
             // Try to enable 4:4:4 for perfect color if supported by the profile
-            // We use av_opt_set which returns < 0 if the option/value is invalid for this GPU
-            if (av_opt_set(m_codecContext->priv_data, "profile", "high444p", 0) < 0) {
-                spdlog::warn("NVIDIA 4:4:4 profile not supported on this GPU, falling back to standard");
-            // If fallback is needed, sw_pix_fmt should ideally be updated if we already set it to YUV444P
-            // However, we set sw_format in InitializeHardwareContext based on encoderType.
-            // If we are here, encoderType was NVIDIA_NVENC.
+            // H.264 uses 'high444p', HEVC uses 'main444'
+            const char* profile = (m_codecContext->codec_id == AV_CODEC_ID_HEVC) ? "main444" : "high444p";
+            if (av_opt_set(m_codecContext->priv_data, "profile", profile, 0) < 0) {
+                spdlog::warn("NVIDIA 4:4:4 profile '{}' not supported on this GPU, falling back to standard", profile);
             }
 
             // FIX: Force IDR frames for keyframes

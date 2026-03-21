@@ -195,26 +195,46 @@ private:
 
         try {
             m_gpuInfo = m_gpuDetector->GetGPUByIndex(m_settings.gpuIndex);
-        } catch (...) { return false; }
+        } catch (...) {
+            spdlog::error("Screenshot: Failed to get GPU info");
+            return false;
+        }
+
+        m_displayManager->SetActiveDisplay(m_settings.displayIndex);
+        ComPtr<IDXGIOutput> output = m_displayManager->GetActiveDisplayOutput();
+
+        ComPtr<IDXGIAdapter> displayAdapter;
+        if (output) {
+            output->GetParent(IID_PPV_ARGS(&displayAdapter));
+        }
 
         ComPtr<IDXGIFactory1> factory;
         CreateDXGIFactory1(IID_PPV_ARGS(&factory));
-        ComPtr<IDXGIAdapter1> adapter;
-        for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++) {
+        ComPtr<IDXGIAdapter1> encodeAdapter;
+        for (UINT i = 0; factory->EnumAdapters1(i, &encodeAdapter) == S_OK; i++) {
             DXGI_ADAPTER_DESC1 desc;
-            adapter->GetDesc1(&desc);
+            encodeAdapter->GetDesc1(&desc);
             if (desc.AdapterLuid.LowPart == m_gpuInfo.adapterLuid.LowPart &&
-                desc.AdapterLuid.HighPart == m_gpuInfo.adapterLuid.HighPart) break;
+                desc.AdapterLuid.HighPart == m_gpuInfo.adapterLuid.HighPart) {
+                break;
+            }
+            encodeAdapter.Reset();
         }
 
-        if (!adapter) return false;
+        if (!encodeAdapter) {
+            spdlog::error("Screenshot: Could not match encoding adapter");
+            return false;
+        }
 
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
-        D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+        HRESULT hr = D3D11CreateDevice(encodeAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context);
 
-        if (!device) return false;
+        if (FAILED(hr) || !device) {
+            spdlog::error("Screenshot: Failed to create D3D11 device: 0x{:08X}", (uint32_t)hr);
+            return false;
+        }
 
         bool success = false;
         if (m_settings.usbDeviceIndex >= 0) {
@@ -230,15 +250,32 @@ private:
                 }
             }
         } else {
-            m_displayManager->SetActiveDisplay(m_settings.displayIndex);
-            ComPtr<IDXGIOutput> output = m_displayManager->GetActiveDisplayOutput();
             if (output) {
+                // If the display is on a different adapter, we MUST create a device on that adapter for capture
+                ComPtr<ID3D11Device> captureDevice = device;
+                ComPtr<ID3D11DeviceContext> captureContext = context;
+
+                DXGI_ADAPTER_DESC displayDesc;
+                displayAdapter->GetDesc(&displayDesc);
+                DXGI_ADAPTER_DESC1 encodeDesc;
+                encodeAdapter->GetDesc1(&encodeDesc);
+
+                bool isSameAdapter = (displayDesc.AdapterLuid.LowPart == encodeDesc.AdapterLuid.LowPart &&
+                                    displayDesc.AdapterLuid.HighPart == encodeDesc.AdapterLuid.HighPart);
+
+                if (!isSameAdapter) {
+                    spdlog::info("Screenshot: Cross-adapter capture needed");
+                    D3D11CreateDevice(displayAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                        D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &captureDevice, nullptr, &captureContext);
+                }
+
                 auto cap = std::make_unique<FrameCapture>();
-                if (cap->Initialize(false, nullptr, m_gpuInfo, device, context, output)) {
+                // In single frame mode, we don't need staging if we have the right device
+                if (cap->Initialize(false, nullptr, m_gpuInfo, captureDevice, captureContext, output)) {
                     if (cap->StartCapture(1, 60)) {
                         CapturedFrame frame;
                         if (cap->GetNextFrame(frame, 2000)) {
-                            SaveTextureAsPngManual(device, context, frame.texture, outputPath);
+                            SaveTextureAsPngManual(captureDevice, captureContext, frame.texture, outputPath);
                             success = true;
                         }
                         cap->StopCapture();
@@ -358,7 +395,7 @@ private:
         // Use sws_scale to convert BGRA to RGB24 correctly
         SwsContext* sws = sws_getContext(width, height, AV_PIX_FMT_BGRA,
                                        width, height, AV_PIX_FMT_RGB24,
-                                       SWS_BICUBIC, nullptr, nullptr, nullptr);
+                                       SWS_LANCZOS, nullptr, nullptr, nullptr);
 
         if (sws) {
             const uint8_t* srcData[1] = { bgraData };
