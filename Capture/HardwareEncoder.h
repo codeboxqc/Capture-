@@ -130,6 +130,11 @@ public:
         m_codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         m_keyframeInterval = m_codecContext->gop_size;
 
+        // Force AV1 to use global headers if possible
+        if (settings.codec == Codec::AV1) {
+            m_codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        }
+
         if (m_useSystemMemory) {
             m_codecContext->pix_fmt = AV_PIX_FMT_YUV420P; // Better compatibility than 444 for software
             m_codecContext->sw_pix_fmt = AV_PIX_FMT_YUV420P;
@@ -291,8 +296,8 @@ public:
             ep.keyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
 
             // Capture extradata if newly available from the encoder
-            if (m_codecContext->extradata_size > 0) {
-                // Ensure we have the latest extradata for the muxer
+            if (m_codecContext->extradata_size > 0 && m_codecContext->extradata) {
+                // It's already in m_codecContext->extradata
             }
 
             outPackets.push_back(std::move(ep));

@@ -24,7 +24,7 @@ struct WriteTask {
 class DiskWriter {
 public:
     DiskWriter() : m_running(false), m_formatContext(nullptr), m_videoStream(nullptr), m_audioStream(nullptr),
-        m_headerWritten(false), m_startTimestamp(0), m_bytesWritten(0), m_framesWritten(0), m_audioPacketsWritten(0) {
+        m_headerWritten(false), m_startTimestamp(-1), m_bytesWritten(0), m_framesWritten(0), m_audioPacketsWritten(0) {
     }
 
     ~DiskWriter() { StopWriter(); }
@@ -148,17 +148,10 @@ public:
 
                 if (!m_headerWritten) {
                     // We MUST start with a video keyframe to avoid scramble/grey frames in VLC.
-                    // Audio can wait for the first video keyframe.
-                    if (task.isVideo && task.keyframe) {
+                    // Also wait for valid extradata (SPS/PPS) to ensure playable MKV headers.
+                    if (task.isVideo && task.keyframe && m_videoStream->codecpar->extradata_size > 0) {
                         // Anchoring start to EXACT timestamp of the first keyframe
                         m_startTimestamp = task.timestamp;
-
-                        // Ensure we have extradata before writing header (VLC needs this)
-                        if (m_videoStream->codecpar->extradata_size == 0) {
-                             spdlog::warn("Still waiting for video extradata...");
-                             // If we still don't have it, we might need to defer further
-                             // but matroska often works with what it has.
-                        }
 
                         int ret = avformat_write_header(m_formatContext, nullptr);
                         if (ret < 0) {
@@ -220,7 +213,7 @@ public:
         m_videoStream = nullptr;
         m_audioStream = nullptr;
         m_headerWritten = false;
-        m_startTimestamp = 0;
+        m_startTimestamp = -1;
     }
 
     void QueueWriteTask(WriteTask&& task) {
@@ -293,6 +286,8 @@ private:
     }
 
     void WriteVideo(WriteTask& task) {
+        if (m_startTimestamp == (uint64_t)-1 || task.timestamp < m_startTimestamp) return;
+
         AVPacket* pkt = av_packet_alloc();
         if (!pkt) {
             spdlog::error("Failed to allocate video packet");
@@ -311,15 +306,19 @@ private:
         pkt->stream_index = m_videoStream->index;
 
         // Convert microsecond capture timestamp to millisecond stream timestamp
+        // Anchor relative to start of recording
         int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
         pkt->pts = av_rescale_q(pts_us, { 1, 1000000 }, m_videoStream->time_base);
         pkt->dts = pkt->pts;
 
+        // Help VLC calculate duration by setting packet duration (1/FPS in stream timebase)
+        pkt->duration = av_rescale_q(1, m_videoStream->r_frame_rate, m_videoStream->time_base);
+
         if (task.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
 
-        // Use standard write_frame for video as packets are already in order.
-        // This reduces overhead compared to interleaved_write_frame.
-        ret = av_write_frame(m_formatContext, pkt);
+        // Switched back to interleaved_write_frame to ensure correct Matroska packet order
+        // and duration calculation by the muxer.
+        ret = av_interleaved_write_frame(m_formatContext, pkt);
         if (ret < 0) {
             // FIX: Don't spam logs, just count errors
             static std::atomic<uint64_t> videoWriteErrors{0};
@@ -336,7 +335,7 @@ private:
     }
 
     void WriteAudio(WriteTask& task) {
-        if (task.timestamp < m_startTimestamp) return;
+        if (m_startTimestamp == -1 || task.timestamp < m_startTimestamp) return;
         if (!m_audioStream) return;  // FIX: Extra safety check
 
         AVPacket* pkt = av_packet_alloc();
