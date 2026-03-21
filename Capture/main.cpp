@@ -32,7 +32,7 @@ std::shared_ptr<IRecordingEngine> g_engine;
 std::mutex g_engineMutex;
 RecordingSettings g_settings;
 std::vector<ExtendedGPUInfo> g_availableGPUs;
-std::atomic<bool> g_recording = false;
+std::atomic<bool> g_recording{ false };
 bool g_showSettings = true;
 PerformanceMetrics g_metrics;
 std::string g_statusMessage = "Ready";
@@ -290,7 +290,7 @@ public:
 
         {
             std::lock_guard<std::mutex> lock(g_engineMutex);
-            g_engine = std::move(CreateRecordingEngine());
+            g_engine = CreateRecordingEngine();
             g_engine->SetStatusCallback([](const std::string& msg) {
                 std::lock_guard<std::mutex> lock(g_statusMutex);
                 g_statusMessage = msg;
@@ -301,16 +301,11 @@ public:
             });
 
             if (!g_engine->Initialize()) {
-                // We'll clean up outside the lock to be safe
-            }
-            else {
-                goto init_success;
+                g_engine.reset();
+                Cleanup();
+                return 1;
             }
         }
-        Cleanup();
-        return 1;
-
-    init_success:
 
         DetectGPUs();
         DetectDisplays();
@@ -931,12 +926,13 @@ private:
         }
         if (!engine) return;
 
-        // Sync current UI selections to settings
+        // Sync current UI selections to settings for single-frame capture
         g_settings.gpuIndex = m_selectedGPU;
         g_settings.displayIndex = m_selectedDisplay;
         g_settings.usbDeviceIndex = m_selectedUSBDevice;
 
-        std::filesystem::path outputPath(g_outputPath);
+        std::string currentOutputPath = g_outputPath;
+        std::filesystem::path outputPath(currentOutputPath);
         std::filesystem::path folderPath = outputPath.parent_path();
 
         // Ensure folder exists
@@ -944,7 +940,7 @@ private:
             try {
                 std::filesystem::create_directories(folderPath);
             } catch (...) {
-                g_statusMessage = "Error: Could not create directory";
+                SetStatus("Error: Could not create directory");
                 return;
             }
         }
@@ -955,14 +951,27 @@ private:
         SetStatus("Capturing screenshot...");
 
         // Run in a separate thread to prevent UI hang
-        // Use local engine shared_ptr to ensure engine stays alive
-        std::thread([this, engine, uniquePath]() {
+        // We use a lambda that doesn't capture 'this' to avoid use-after-free
+        std::thread([engine, uniquePath]() {
             bool success = engine->CaptureScreenshot(uniquePath);
 
             if (success) {
-                SetStatus("Screenshot saved: " + std::filesystem::path(uniquePath).filename().string());
+                std::string filename = std::filesystem::path(uniquePath).filename().string();
+                // Check if it might have fallen back to BMP
+                if (!std::filesystem::exists(uniquePath)) {
+                    std::string bmpPath = uniquePath;
+                    if (bmpPath.size() > 4) bmpPath.replace(bmpPath.size() - 3, 3, "bmp");
+                    if (std::filesystem::exists(bmpPath)) {
+                        filename = std::filesystem::path(bmpPath).filename().string();
+                    }
+                }
+
+                // Use the global mutex-protected status update
+                std::lock_guard<std::mutex> lock(g_statusMutex);
+                g_statusMessage = "Screenshot saved: " + filename;
             } else {
-                SetStatus("Failed to take screenshot");
+                std::lock_guard<std::mutex> lock(g_statusMutex);
+                g_statusMessage = "Failed to take screenshot";
             }
         }).detach();
     }

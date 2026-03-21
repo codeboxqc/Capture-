@@ -489,8 +489,8 @@ private:
             ret |= av_opt_set_int(m_codecContext->priv_data, "qp", targetQuality, 0);
 
             // Try to enable 4:4:4 for perfect color if supported by the profile
-            // H.264 uses 'high444p', HEVC uses 'main444'
-            const char* profile = (m_codecContext->codec_id == AV_CODEC_ID_HEVC) ? "main444" : "high444p";
+            // H.264 uses 'high444p', HEVC (NVENC) uses 'rext' for 4:4:4
+            const char* profile = (m_codecContext->codec_id == AV_CODEC_ID_HEVC) ? "rext" : "high444p";
             if (av_opt_set(m_codecContext->priv_data, "profile", profile, 0) < 0) {
                 spdlog::warn("NVIDIA 4:4:4 profile '{}' not supported on this GPU, falling back to standard", profile);
             }

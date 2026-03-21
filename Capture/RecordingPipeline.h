@@ -270,8 +270,8 @@ private:
                 }
 
                 auto cap = std::make_unique<FrameCapture>();
-                // In single frame mode, we don't need staging if we have the right device
-                if (cap->Initialize(false, nullptr, m_gpuInfo, captureDevice, captureContext, output)) {
+                // For cross-adapter screenshot, we use staging to be safe
+                if (cap->Initialize(!isSameAdapter, nullptr, m_gpuInfo, captureDevice, captureContext, output)) {
                     if (cap->StartCapture(1, 60)) {
                         CapturedFrame frame;
                         if (cap->GetNextFrame(frame, 2000)) {
@@ -313,8 +313,8 @@ private:
         }
     }
 
-    void SaveTextureAsPngAsync(ComPtr<ID3D11Texture2D> texture, const std::string& path) {
-        if (!texture) return;
+    void SaveTextureAsPngAsync(ComPtr<ID3D11Device> device, ComPtr<ID3D11DeviceContext> context, ComPtr<ID3D11Texture2D> texture, const std::string& path) {
+        if (!texture || !device || !context) return;
 
         D3D11_TEXTURE2D_DESC desc;
         texture->GetDesc(&desc);
@@ -328,16 +328,16 @@ private:
         stagingDesc.MipLevels = 1;
         stagingDesc.ArraySize = 1;
 
-        HRESULT hr = m_sharedD3D11Device->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture);
+        HRESULT hr = device->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture);
         if (FAILED(hr)) {
             spdlog::error("Failed to create staging texture for screenshot: 0x{:08X}", static_cast<uint32_t>(hr));
             return;
         }
 
-        m_sharedD3D11Context->CopyResource(stagingTexture.Get(), texture.Get());
+        context->CopyResource(stagingTexture.Get(), texture.Get());
 
         D3D11_MAPPED_SUBRESOURCE mapped;
-        hr = m_sharedD3D11Context->Map(stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+        hr = context->Map(stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
         if (FAILED(hr)) {
             spdlog::error("Failed to map staging texture for screenshot: 0x{:08X}", static_cast<uint32_t>(hr));
             return;
@@ -348,7 +348,7 @@ private:
         auto buffer = std::make_shared<std::vector<uint8_t>>(dataSize);
         memcpy(buffer->data(), mapped.pData, dataSize);
 
-        m_sharedD3D11Context->Unmap(stagingTexture.Get(), 0);
+        context->Unmap(stagingTexture.Get(), 0);
 
         // Run PNG encoding in a separate thread to prevent recording stutter
         // Use a shared_ptr buffer to keep data alive
@@ -402,13 +402,12 @@ private:
         spdlog::info("Screenshot saved as BMP (Perfect Quality): {}", path);
     }
 
-    static void SaveRawRgbaToPngStatic(const uint8_t* bgraData, uint32_t width, uint32_t height, uint32_t stride, const std::string& path) {
+    static void SaveRawRgbaToPngStatic(const uint8_t* bgraData, uint32_t width, uint32_t height, uint32_t stride, std::string path) {
         const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_PNG);
         if (!codec) {
             spdlog::warn("PNG encoder not found, falling back to BMP for perfect quality");
-            std::string bmpPath = path;
-            if (bmpPath.size() > 4) bmpPath.replace(bmpPath.size() - 3, 3, "bmp");
-            SaveRawBgraToBmp(bgraData, width, height, stride, bmpPath);
+            if (path.size() > 4) path.replace(path.size() - 3, 3, "bmp");
+            SaveRawBgraToBmp(bgraData, width, height, stride, path);
             return;
         }
 
@@ -522,6 +521,9 @@ private:
         m_settings.width = m_usbCapture->GetWidth();
         m_settings.height = m_usbCapture->GetHeight();
         spdlog::info("USB Capture Resolution: {}x{}", m_settings.width, m_settings.height);
+
+        m_captureD3D11Device = m_sharedD3D11Device;
+        m_captureD3D11Context = m_sharedD3D11Context;
 
         // Initialize USB Audio
         if (settings.captureAudio) {
@@ -819,7 +821,8 @@ private:
                     std::lock_guard<std::mutex> lock(m_screenshotMutex);
                     // Double check inside lock
                     if (m_screenshotRequested) {
-                        SaveTextureAsPngAsync(frame.texture, m_screenshotPath);
+                        // FIX: Use capture device/context for screenshot since frame texture is on that adapter
+                        SaveTextureAsPngAsync(m_captureD3D11Device, m_captureD3D11Context, frame.texture, m_screenshotPath);
                         m_screenshotRequested = false;
                     }
                 }
@@ -827,6 +830,32 @@ private:
             }
 
             if (!gotFrame || !frame.texture) continue;
+
+            // Cross-adapter texture copy if needed
+            ComPtr<ID3D11Texture2D> originalTexture = frame.texture;
+            if (!m_isSameAdapter && !m_isUSBCapture) {
+                D3D11_MAPPED_SUBRESOURCE mapped;
+                HRESULT hr = m_captureD3D11Context->Map(frame.texture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+                if (SUCCEEDED(hr)) {
+                    if (!m_crossAdapterEncodeTexture) {
+                        D3D11_TEXTURE2D_DESC desc;
+                        frame.texture->GetDesc(&desc);
+                        desc.Usage = D3D11_USAGE_DEFAULT;
+                        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+                        desc.CPUAccessFlags = 0;
+                        m_sharedD3D11Device->CreateTexture2D(&desc, nullptr, &m_crossAdapterEncodeTexture);
+                    }
+
+                    if (m_crossAdapterEncodeTexture) {
+                        m_sharedD3D11Context->UpdateSubresource(m_crossAdapterEncodeTexture.Get(), 0, nullptr, mapped.pData, mapped.RowPitch, 0);
+                        frame.texture = m_crossAdapterEncodeTexture;
+                    }
+                    m_captureD3D11Context->Unmap(originalTexture.Get(), 0);
+                }
+                else {
+                    spdlog::error("Cross-adapter transfer: Failed to map capture texture: 0x{:08X}", (uint32_t)hr);
+                }
+            }
 
             // FIX: Set recording start time on first frame for A/V sync
             if (firstFrame) {
@@ -861,7 +890,7 @@ private:
                 m_usbCapture->ReturnTexture(usbFrame.texture);
             }
             else if (m_frameCapture) {
-                m_frameCapture->ReturnTexture(frame.texture);
+                m_frameCapture->ReturnTexture(originalTexture);
             }
         }
         spdlog::info("Processing thread exiting");
