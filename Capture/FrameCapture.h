@@ -183,7 +183,12 @@ private:
 
                 CapturedFrame frame;
                 frame.texture = destTexture;
-                frame.timestamp = GetTimestamp();
+
+                // Use high-precision timestamp from DXGI
+                LARGE_INTEGER qpcFreq;
+                QueryPerformanceFrequency(&qpcFreq);
+                frame.timestamp = (frameInfo.LastPresentTime.QuadPart * 1000000) / qpcFreq.QuadPart;
+
                 frame.frameIndex = static_cast<uint32_t>(currentFrameIndex);
                 frame.isKeyframe = (currentFrameIndex % keyframeInterval == 0);  // FIX: Set keyframe flag
                 frame.hdrMetadata = false;  // FIX: Initialize to false

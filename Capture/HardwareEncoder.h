@@ -9,7 +9,6 @@ extern "C" {
 
 struct EncodedPacket {
     std::vector<uint8_t> data;
-    uint64_t sourceTimestamp;
     int64_t pts;
     bool keyframe;
 };
@@ -118,46 +117,91 @@ public:
 
         m_useSystemMemory = (gpuInfo.encoderType == EncoderType::INTEL_QSV || gpuInfo.encoderType == EncoderType::SOFTWARE);
 
-        if (!m_useSystemMemory) {
-            if (!InitializeHardwareContext(settings)) {
-                spdlog::error("Failed to initialize hardware context");
-                Cleanup();
-                return false;
-            }
+        bool tryingSaferDefaults = false;
+
+    retry_init:
+        m_codecContext->width = settings.width;
+        m_codecContext->height = settings.height;
+        m_codecContext->time_base = { 1, 1000000 }; // Internal microsecond timebase
+        m_codecContext->framerate = { static_cast<int>(settings.fps), 1 };
+        // Shorter GOP (1 second) for better seeking and recovery
+        m_codecContext->gop_size = static_cast<int>(settings.fps);
+        m_codecContext->max_b_frames = 0;
+        m_codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        m_keyframeInterval = m_codecContext->gop_size;
+
+        // Force AV1 to use global headers if possible
+        if (settings.codec == Codec::AV1) {
+            m_codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         }
-        else {
+
+        if (m_useSystemMemory) {
+            m_codecContext->pix_fmt = AV_PIX_FMT_YUV420P; // Better compatibility than 444 for software
+            m_codecContext->sw_pix_fmt = AV_PIX_FMT_YUV420P;
             if (!InitializeSystemMemoryContext(settings, gpuInfo)) {
                 spdlog::error("Failed to initialize system memory context");
                 Cleanup();
                 return false;
             }
         }
+        else {
+            if (gpuInfo.encoderType == EncoderType::NVIDIA_NVENC) {
+                m_codecContext->pix_fmt = AV_PIX_FMT_D3D11;
+            }
+            else {
+                m_codecContext->pix_fmt = AV_PIX_FMT_NV12;
+            }
 
-        m_codecContext->width = settings.width;
-        m_codecContext->height = settings.height;
-        m_codecContext->time_base = { 1, static_cast<int>(settings.fps) };
-        m_codecContext->framerate = { static_cast<int>(settings.fps), 1 };
-        m_codecContext->gop_size = settings.fps * 2;
-        m_codecContext->max_b_frames = 0;
-        m_codecContext->bit_rate = 0;
+            if (!InitializeHardwareContext(settings, gpuInfo.encoderType)) {
+                spdlog::warn("Hardware context init failed, falling back to software");
+                m_useSystemMemory = true;
+                avcodec_free_context(&m_codecContext);
+                codec = GetSoftwareCodec(settings.codec);
+                if (!codec) return false;
+                m_codecContext = avcodec_alloc_context3(codec);
+                goto retry_init;
+            }
+        }
 
-        // Set flags for global headers (needed for MKV)
-        m_codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        // PRO TIP: Lower QP = Higher Quality. 0 is lossless. 10-15 is nearly perfect.
+        int targetQuality = 12;
 
-        // FIX: Save keyframe interval
-        m_keyframeInterval = m_codecContext->gop_size;
-
-        int targetQuality = 15;
-
-        if (!ConfigureEncoderOptions(gpuInfo.encoderType, targetQuality)) {
+    open_codec:
+        EncoderType effectiveType = m_useSystemMemory ? EncoderType::SOFTWARE : gpuInfo.encoderType;
+        if (!ConfigureEncoderOptions(effectiveType, targetQuality)) {
             spdlog::warn("Some encoder options may not have been applied");
+        }
+
+        if (tryingSaferDefaults) {
+            av_opt_set(m_codecContext->priv_data, "profile", "high", 0);
+            av_opt_set(m_codecContext->priv_data, "preset", "medium", 0);
         }
 
         int ret = avcodec_open2(m_codecContext, codec, nullptr);
         if (ret < 0) {
             char errBuf[AV_ERROR_MAX_STRING_SIZE];
             av_strerror(ret, errBuf, sizeof(errBuf));
-            spdlog::error("Failed to open codec: {}", errBuf);
+            spdlog::warn("Failed to open codec ({}): {}. Retrying...", codec->name, errBuf);
+
+            if (!m_useSystemMemory && !tryingSaferDefaults) {
+                spdlog::info("Retrying with safer hardware defaults");
+                tryingSaferDefaults = true;
+                goto open_codec;
+            }
+
+            if (!m_useSystemMemory) {
+                spdlog::warn("Hardware defaults failed, falling back to software");
+                m_useSystemMemory = true;
+                tryingSaferDefaults = false;
+                avcodec_free_context(&m_codecContext);
+                codec = GetSoftwareCodec(settings.codec);
+                if (codec) {
+                    m_codecContext = avcodec_alloc_context3(codec);
+                    if (m_codecContext) goto retry_init;
+                }
+            }
+
+            spdlog::error("Failed to open any codec context");
             Cleanup();
             return false;
         }
@@ -209,7 +253,7 @@ public:
             return false;
         }
 
-        avFrame->pts = frame.frameIndex;
+        avFrame->pts = frame.timestamp;
 
         // FIX: Properly request keyframe (pict_type only - key_frame removed in newer FFmpeg)
         if (frame.isKeyframe || (m_frameCount % m_keyframeInterval == 0)) {
@@ -249,8 +293,12 @@ public:
             EncodedPacket ep;
             ep.data.assign(m_packet->data, m_packet->data + m_packet->size);
             ep.pts = m_packet->pts;
-            ep.sourceTimestamp = frame.timestamp;
             ep.keyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
+
+            // Capture extradata if newly available from the encoder
+            if (m_codecContext->extradata_size > 0 && m_codecContext->extradata) {
+                // It's already in m_codecContext->extradata
+            }
 
             outPackets.push_back(std::move(ep));
             m_encodedFrames++;
@@ -279,7 +327,6 @@ public:
             EncodedPacket ep;
             ep.data.assign(m_packet->data, m_packet->data + m_packet->size);
             ep.pts = m_packet->pts;
-            ep.sourceTimestamp = 0;
             ep.keyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
 
             outPackets.push_back(std::move(ep));
@@ -294,20 +341,34 @@ public:
 
     std::vector<uint8_t> GetExtradata() const {
         if (!m_codecContext) return {};
-        if (!m_codecContext->extradata || m_codecContext->extradata_size <= 0) return {};
         
-        return std::vector<uint8_t>(
-            m_codecContext->extradata, 
-            m_codecContext->extradata + m_codecContext->extradata_size
-        );
+        // Check if extradata was updated during encoding
+        if (m_codecContext->extradata && m_codecContext->extradata_size > 0) {
+            return std::vector<uint8_t>(
+                m_codecContext->extradata,
+                m_codecContext->extradata + m_codecContext->extradata_size
+            );
+        }
+        return {};
     }
     
     // FIX: Added stats getters
     uint64_t GetFrameCount() const { return m_frameCount; }
     uint64_t GetEncodedFrames() const { return m_encodedFrames.load(); }
     bool IsInitialized() const { return m_codecContext != nullptr && m_packet != nullptr; }
+    AVPixelFormat GetPixelFormat() const { return m_codecContext ? m_codecContext->pix_fmt : AV_PIX_FMT_NONE; }
+    AVPixelFormat GetSoftwarePixelFormat() const {
+        if (!m_codecContext) return AV_PIX_FMT_NONE;
+        return (m_codecContext->sw_pix_fmt != AV_PIX_FMT_NONE) ? m_codecContext->sw_pix_fmt : m_codecContext->pix_fmt;
+    }
 
 private:
+    const AVCodec* GetSoftwareCodec(Codec codec) {
+        if (codec == Codec::H265) return avcodec_find_encoder(AV_CODEC_ID_HEVC);
+        if (codec == Codec::AV1) return avcodec_find_encoder(AV_CODEC_ID_AV1);
+        return avcodec_find_encoder(AV_CODEC_ID_H264);
+    }
+
     void Cleanup() {
         if (m_swsContext) {
             sws_freeContext(m_swsContext);
@@ -337,7 +398,8 @@ private:
         m_stagingTexture.Reset();
     }
 
-    bool InitializeHardwareContext(const RecordingSettings& settings) {
+    bool InitializeHardwareContext(const RecordingSettings& settings, EncoderType encoderType) {
+        // NVENC can accept D3D11 textures directly
         m_hwDeviceCtx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
         if (!m_hwDeviceCtx) {
             spdlog::error("Failed to allocate hardware device context");
@@ -368,7 +430,12 @@ private:
 
         AVHWFramesContext* framesCtx = (AVHWFramesContext*)m_hwFramesCtx->data;
         framesCtx->format = AV_PIX_FMT_D3D11;
+
+        // Always use BGRA for the software format of hardware frames.
+        // This is necessary because the input textures (DXGI_FORMAT_B8G8R8A8_UNORM)
+        // are directly mapped to BGRA.
         framesCtx->sw_format = AV_PIX_FMT_BGRA;
+
         framesCtx->width = settings.width;
         framesCtx->height = settings.height;
         framesCtx->initial_pool_size = 64;
@@ -388,14 +455,12 @@ private:
         }
         
         m_codecContext->pix_fmt = AV_PIX_FMT_D3D11;
-        m_codecContext->sw_pix_fmt = AV_PIX_FMT_BGRA;
+        m_codecContext->sw_pix_fmt = framesCtx->sw_format;
 
         return true;
     }
 
     bool InitializeSystemMemoryContext(const RecordingSettings& settings, const GPUInfo& gpuInfo) {
-        m_codecContext->pix_fmt = AV_PIX_FMT_NV12;
-
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width = settings.width;
         desc.Height = settings.height;
@@ -415,8 +480,8 @@ private:
 
         m_swsContext = sws_getContext(
             settings.width, settings.height, AV_PIX_FMT_BGRA,
-            settings.width, settings.height, AV_PIX_FMT_NV12,
-            SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+            settings.width, settings.height, m_codecContext->pix_fmt,
+            SWS_LANCZOS, nullptr, nullptr, nullptr);
 
         if (!m_swsContext) {
             spdlog::error("Failed to create SWS context");
@@ -454,28 +519,53 @@ private:
         int ret = 0;
 
         if (encoderType == EncoderType::NVIDIA_NVENC) {
-            ret |= av_opt_set(m_codecContext->priv_data, "preset", "p4", 0);
+            // "p7" is the slowest/highest quality preset for NVENC
+            ret |= av_opt_set(m_codecContext->priv_data, "preset", "p7", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "tune", "hq", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "delay", "0", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "zerolatency", "1", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "rc", "constqp", 0);
             ret |= av_opt_set_int(m_codecContext->priv_data, "qp", targetQuality, 0);
-            // FIX: Force IDR frames for keyframes
+
+            // Try to enable 4:4:4 for perfect color if supported by the profile
+            // H.264 uses 'high444p', HEVC (NVENC) uses 'rext' for 4:4:4
+            const char* profile = (m_codecContext->codec_id == AV_CODEC_ID_HEVC) ? "rext" : "high444p";
+            if (av_opt_set(m_codecContext->priv_data, "profile", profile, 0) < 0) {
+                spdlog::warn("NVIDIA 4:4:4 profile '{}' not supported on this GPU, falling back to standard", profile);
+            }
+
+            // FIX: Force IDR frames for keyframes to ensure seekability
             ret |= av_opt_set(m_codecContext->priv_data, "forced-idr", "1", 0);
+
+            // Set IDR period explicitly
+            std::string gopStr = std::to_string(m_codecContext->gop_size);
+            ret |= av_opt_set(m_codecContext->priv_data, "idr_period", gopStr.c_str(), 0);
+
+            // Repeat headers for robustness (SPS/PPS in every IDR)
+            ret |= av_opt_set(m_codecContext->priv_data, "repeat-headers", "1", 0);
+
+            // Enable AQ for better quality
+            ret |= av_opt_set(m_codecContext->priv_data, "spatial-aq", "1", 0);
+            ret |= av_opt_set(m_codecContext->priv_data, "temporal-aq", "1", 0);
+
+            // Disable B-frames for low latency and consistent timestamps
+            m_codecContext->max_b_frames = 0;
+            m_codecContext->has_b_frames = 0;
         }
         else if (encoderType == EncoderType::AMD_AMF) {
-            ret |= av_opt_set(m_codecContext->priv_data, "quality", "balanced", 0);
+            ret |= av_opt_set(m_codecContext->priv_data, "quality", "quality", 0); // "quality" is higher than "balanced"
             ret |= av_opt_set(m_codecContext->priv_data, "rc", "cqp", 0);
             ret |= av_opt_set_int(m_codecContext->priv_data, "qp_i", targetQuality, 0);
             ret |= av_opt_set_int(m_codecContext->priv_data, "qp_p", targetQuality, 0);
         }
         else if (encoderType == EncoderType::INTEL_QSV) {
-            ret |= av_opt_set(m_codecContext->priv_data, "preset", "balanced", 0);
-            ret |= av_opt_set(m_codecContext->priv_data, "async_depth", "2", 0);
+            ret |= av_opt_set(m_codecContext->priv_data, "preset", "veryslow", 0); // "veryslow" is highest quality
+            ret |= av_opt_set(m_codecContext->priv_data, "async_depth", "4", 0);
             ret |= av_opt_set_int(m_codecContext->priv_data, "global_quality", targetQuality, 0);
         }
         else if (encoderType == EncoderType::SOFTWARE) {
-            ret |= av_opt_set(m_codecContext->priv_data, "preset", "ultrafast", 0);
+            // libx264/libx265 presets
+            ret |= av_opt_set(m_codecContext->priv_data, "preset", "veryslow", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "crf", std::to_string(targetQuality).c_str(), 0);
         }
 
@@ -483,7 +573,7 @@ private:
     }
 
     bool PrepareSystemMemoryFrame(const CapturedFrame& frame, AVFrame* avFrame) {
-        avFrame->format = AV_PIX_FMT_NV12;
+        avFrame->format = m_codecContext->pix_fmt;
         avFrame->width = m_codecContext->width;
         avFrame->height = m_codecContext->height;
 
@@ -547,6 +637,7 @@ private:
         }
 
         m_d3d11Context->CopySubresourceRegion(dstTex, dstSubresource, 0, 0, 0, srcTex, 0, nullptr);
+        m_d3d11Context->Flush(); // Ensure hardware copy is complete before encoding starts
 
         return true;
     }

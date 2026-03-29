@@ -11,6 +11,12 @@
 #include <d3d11_4.h> 
 #include <fstream>
 #include <filesystem>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <vector>
+#include <memory>
 
 class RecordingPipeline : public IRecordingEngine {
 public:
@@ -54,6 +60,7 @@ public:
         m_captureD3D11Device.Reset();
         m_captureD3D11Context.Reset();
         m_crossAdapterEncodeTexture.Reset();
+        m_captureStagingTexture.Reset();
     }
 
     bool StartRecording(const RecordingSettings& settings) override {
@@ -112,8 +119,8 @@ public:
             for (auto& packet : finalPackets) {
                 WriteTask task;
                 task.data = std::move(packet.data);
-                // FIX: Use current time for flush packets (they're from recent frames)
-                task.timestamp = GetCurrentTimestampUs();
+                // Flush packets already have the correct QPC pts from the encoder
+                task.timestamp = static_cast<uint64_t>(packet.pts);
                 task.isVideo = true;
                 task.pts = packet.pts;
                 task.keyframe = packet.keyframe;
@@ -141,6 +148,10 @@ public:
         return metrics;
     }
 
+    void UpdateSettings(const RecordingSettings& settings) override {
+        m_settings = settings;
+    }
+
     std::vector<ExtendedGPUInfo> GetAvailableGPUs() const override {
         if (!m_gpuDetector) return {};
         return m_gpuDetector->DetectGPUs();
@@ -149,7 +160,376 @@ public:
     void SetStatusCallback(std::function<void(const std::string&)> callback) override { m_statusCallback = callback; }
     void SetErrorCallback(std::function<void(const std::string&)> callback) override { m_errorCallback = callback; }
 
+    bool CaptureScreenshot(const std::string& outputPath) override {
+        spdlog::info("Capturing screenshot to: {}", outputPath);
+
+        if (m_recording) {
+            std::unique_lock<std::mutex> lock(m_screenshotMutex);
+            m_screenshotRequested = true;
+            m_screenshotPath = outputPath;
+
+            // Wait for screenshot to be taken (timeout after 1s) using a condition variable
+            bool success = m_screenshotCv.wait_for(lock, std::chrono::seconds(1), [this] {
+                return !m_screenshotRequested;
+            });
+
+            if (!success) {
+                spdlog::error("Screenshot timeout");
+                m_screenshotRequested = false;
+                return false;
+            }
+            return true;
+        }
+        else {
+            // Not recording, need to temporarily start capture
+            return CaptureSingleFrame(outputPath);
+        }
+    }
+
 private:
+    std::atomic<bool> m_screenshotRequested{ false };
+    std::mutex m_screenshotMutex;
+    std::condition_variable m_screenshotCv;
+    std::string m_screenshotPath;
+
+    bool CaptureSingleFrame(const std::string& outputPath) {
+        spdlog::info("Performing single-frame capture (not recording)");
+
+        try {
+            m_gpuInfo = m_gpuDetector->GetGPUByIndex(m_settings.gpuIndex);
+        } catch (...) {
+            spdlog::error("Screenshot: Failed to get GPU info");
+            return false;
+        }
+
+        m_displayManager->SetActiveDisplay(m_settings.displayIndex);
+        ComPtr<IDXGIOutput> output = m_displayManager->GetActiveDisplayOutput();
+
+        ComPtr<IDXGIAdapter> displayAdapter;
+        if (output) {
+            output->GetParent(IID_PPV_ARGS(&displayAdapter));
+        }
+
+        ComPtr<IDXGIFactory1> factory;
+        CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+        ComPtr<IDXGIAdapter1> encodeAdapter;
+        for (UINT i = 0; factory->EnumAdapters1(i, &encodeAdapter) == S_OK; i++) {
+            DXGI_ADAPTER_DESC1 desc;
+            encodeAdapter->GetDesc1(&desc);
+            if (desc.AdapterLuid.LowPart == m_gpuInfo.adapterLuid.LowPart &&
+                desc.AdapterLuid.HighPart == m_gpuInfo.adapterLuid.HighPart) {
+                break;
+            }
+            encodeAdapter.Reset();
+        }
+
+        if (!encodeAdapter) {
+            spdlog::error("Screenshot: Could not match encoding adapter");
+            return false;
+        }
+
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        HRESULT hr = D3D11CreateDevice(encodeAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context);
+
+        if (FAILED(hr) || !device) {
+            spdlog::error("Screenshot: Failed to create D3D11 device: 0x{:08X}", (uint32_t)hr);
+            return false;
+        }
+
+        bool success = false;
+        if (m_settings.usbDeviceIndex >= 0) {
+            auto usb = std::make_unique<SimpleUSBCapture>();
+            if (usb->Initialize(m_settings.usbDeviceIndex, device)) {
+                // Use a decent buffer for idle capture
+                if (usb->Start(20)) {
+                    USBFrame frame;
+                    USBFrame lastValidFrame = {};
+                    bool gotAnyFrame = false;
+
+                    // Skip up to 30 frames (~1 sec at 30fps) to allow sensor to stabilize
+                    // Some capture cards output black frames initially.
+                    for (int i = 0; i < 45; ++i) {
+                        if (usb->GetFrame(frame, 200)) {
+                            if (gotAnyFrame && lastValidFrame.texture) {
+                                usb->ReturnTexture(lastValidFrame.texture);
+                            }
+                            lastValidFrame = frame;
+                            gotAnyFrame = true;
+                            // Wait a tiny bit between frames to allow for exposure adjustments
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        }
+                        if (!usb->IsRunning()) break;
+                    }
+
+                    if (gotAnyFrame && lastValidFrame.texture) {
+                        SaveTextureAsPngManual(device, context, lastValidFrame.texture, outputPath);
+                        usb->ReturnTexture(lastValidFrame.texture);
+                        success = true;
+                    }
+                    usb->Stop();
+                }
+            }
+        } else {
+            if (output) {
+                // If the display is on a different adapter, we MUST create a device on that adapter for capture
+                ComPtr<ID3D11Device> captureDevice = device;
+                ComPtr<ID3D11DeviceContext> captureContext = context;
+
+                DXGI_ADAPTER_DESC displayDesc;
+                displayAdapter->GetDesc(&displayDesc);
+                DXGI_ADAPTER_DESC1 encodeDesc;
+                encodeAdapter->GetDesc1(&encodeDesc);
+
+                bool isSameAdapter = (displayDesc.AdapterLuid.LowPart == encodeDesc.AdapterLuid.LowPart &&
+                                    displayDesc.AdapterLuid.HighPart == encodeDesc.AdapterLuid.HighPart);
+
+                if (!isSameAdapter) {
+                    spdlog::info("Screenshot: Cross-adapter capture needed");
+                    D3D11CreateDevice(displayAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &captureDevice, nullptr, &captureContext);
+                }
+
+                auto cap = std::make_unique<FrameCapture>();
+                // Use a larger ring buffer for warmup
+                if (cap->Initialize(!isSameAdapter, nullptr, m_gpuInfo, captureDevice, captureContext, output)) {
+                    if (cap->StartCapture(20, 60)) {
+                        CapturedFrame frame;
+                        CapturedFrame lastValidFrame = {};
+                        bool gotAnyFrame = false;
+
+                        // Desktop duplication often needs a few frames to "warm up" and avoid returning
+                        // black/stale frames on the very first acquisition.
+                        // We take up to 20 frames, but keep the last valid one if it goes idle.
+                        for (int i = 0; i < 20; ++i) {
+                            if (cap->GetNextFrame(frame, 500)) {
+                                if (gotAnyFrame && lastValidFrame.texture) {
+                                    cap->ReturnTexture(lastValidFrame.texture);
+                                }
+                                lastValidFrame = frame;
+                                gotAnyFrame = true;
+                                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                            }
+                            // If we already have a frame and it's taking too long (static screen), just use what we have
+                            if (gotAnyFrame && i > 5) break;
+                        }
+
+                        if (gotAnyFrame && lastValidFrame.texture) {
+                            SaveTextureAsPngManual(captureDevice, captureContext, lastValidFrame.texture, outputPath);
+                            cap->ReturnTexture(lastValidFrame.texture);
+                            success = true;
+                        }
+                        cap->StopCapture();
+                    }
+                }
+            }
+        }
+
+        return success;
+    }
+
+    // Helper for CaptureSingleFrame to avoid dependency on pipeline state
+    void SaveTextureAsPngManual(ComPtr<ID3D11Device> device, ComPtr<ID3D11DeviceContext> context,
+                               ComPtr<ID3D11Texture2D> texture, const std::string& path) {
+        if (!texture) return;
+        D3D11_TEXTURE2D_DESC desc;
+        texture->GetDesc(&desc);
+
+        if (desc.Usage == D3D11_USAGE_STAGING && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) {
+            // Already a staging texture, map directly
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            if (SUCCEEDED(context->Map(texture.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+                SaveRawRgbaToPng(reinterpret_cast<uint8_t*>(mapped.pData), desc.Width, desc.Height, mapped.RowPitch, path);
+                context->Unmap(texture.Get(), 0);
+            }
+            return;
+        }
+
+        ComPtr<ID3D11Texture2D> staging;
+        D3D11_TEXTURE2D_DESC sDesc = desc;
+        sDesc.Usage = D3D11_USAGE_STAGING;
+        sDesc.BindFlags = 0;
+        sDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sDesc.MipLevels = 1;
+        sDesc.ArraySize = 1;
+
+        if (SUCCEEDED(device->CreateTexture2D(&sDesc, nullptr, &staging))) {
+            context->CopyResource(staging.Get(), texture.Get());
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            if (SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+                SaveRawRgbaToPng(reinterpret_cast<uint8_t*>(mapped.pData), desc.Width, desc.Height, mapped.RowPitch, path);
+                context->Unmap(staging.Get(), 0);
+            }
+        }
+    }
+
+    void SaveTextureAsPngAsync(ComPtr<ID3D11Device> device, ComPtr<ID3D11DeviceContext> context, ComPtr<ID3D11Texture2D> texture, const std::string& path) {
+        if (!texture || !device || !context) return;
+
+        D3D11_TEXTURE2D_DESC desc;
+        texture->GetDesc(&desc);
+
+        if (desc.Usage == D3D11_USAGE_STAGING && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) {
+            // Already a staging texture, map directly
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            if (SUCCEEDED(context->Map(texture.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+                size_t dataSize = mapped.RowPitch * desc.Height;
+                auto buffer = std::make_shared<std::vector<uint8_t>>(dataSize);
+                memcpy(buffer->data(), mapped.pData, dataSize);
+                context->Unmap(texture.Get(), 0);
+
+                std::thread([buffer, width = desc.Width, height = desc.Height, stride = mapped.RowPitch, path]() {
+                    RecordingPipeline::SaveRawRgbaToPngStatic(buffer->data(), width, height, stride, path);
+                }).detach();
+            }
+            return;
+        }
+
+        // Create staging texture to read back to CPU
+        ComPtr<ID3D11Texture2D> stagingTexture;
+        D3D11_TEXTURE2D_DESC stagingDesc = desc;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stagingDesc.MipLevels = 1;
+        stagingDesc.ArraySize = 1;
+
+        HRESULT hr = device->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture);
+        if (FAILED(hr)) {
+            spdlog::error("Failed to create staging texture for screenshot: 0x{:08X}", static_cast<uint32_t>(hr));
+            return;
+        }
+
+        context->CopyResource(stagingTexture.Get(), texture.Get());
+
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = context->Map(stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+        if (FAILED(hr)) {
+            spdlog::error("Failed to map staging texture for screenshot: 0x{:08X}", static_cast<uint32_t>(hr));
+            return;
+        }
+
+        // Copy raw data for async processing
+        size_t dataSize = mapped.RowPitch * desc.Height;
+        auto buffer = std::make_shared<std::vector<uint8_t>>(dataSize);
+        memcpy(buffer->data(), mapped.pData, dataSize);
+
+        context->Unmap(stagingTexture.Get(), 0);
+
+        // Run PNG encoding in a separate thread
+        std::thread([buffer, width = desc.Width, height = desc.Height, stride = mapped.RowPitch, path]() {
+            RecordingPipeline::SaveRawRgbaToPngStatic(buffer->data(), width, height, stride, path);
+        }).detach();
+    }
+
+    void SaveRawRgbaToPng(const uint8_t* bgraData, uint32_t width, uint32_t height, uint32_t stride, const std::string& path) {
+        SaveRawRgbaToPngStatic(bgraData, width, height, stride, path);
+    }
+
+    static void SaveRawBgraToBmp(const uint8_t* bgraData, uint32_t width, uint32_t height, uint32_t stride, const std::string& path) {
+        std::ofstream ofs(path, std::ios::binary);
+        if (!ofs) return;
+
+#pragma pack(push, 1)
+        struct {
+            uint16_t type{ 0x4D42 };
+            uint32_t size;
+            uint16_t res1{ 0 }, res2{ 0 };
+            uint32_t offBits{ 54 };
+            uint32_t biSize{ 40 };
+            int32_t width;
+            int32_t height;
+            uint16_t planes{ 1 };
+            uint16_t bitCount{ 24 };
+            uint32_t compression{ 0 };
+            uint32_t sizeImage{ 0 };
+            int32_t xPels{ 0 }, yPels{ 0 };
+            uint32_t clrUsed{ 0 }, clrImp{ 0 };
+        } bmp;
+#pragma pack(pop)
+
+        uint32_t rowSize = (width * 3 + 3) & ~3;
+        bmp.width = width;
+        bmp.height = -static_cast<int32_t>(height);
+        bmp.size = 54 + rowSize * height;
+
+        ofs.write(reinterpret_cast<const char*>(&bmp), 54);
+        std::vector<uint8_t> row(rowSize, 0);
+        for (uint32_t y = 0; y < height; y++) {
+            const uint8_t* src = bgraData + y * stride;
+            for (uint32_t x = 0; x < width; x++) {
+                row[x * 3 + 0] = src[x * 4 + 0]; // B
+                row[x * 3 + 1] = src[x * 4 + 1]; // G
+                row[x * 3 + 2] = src[x * 4 + 2]; // R
+            }
+            ofs.write(reinterpret_cast<const char*>(row.data()), rowSize);
+        }
+        spdlog::info("Screenshot saved as BMP (Perfect Quality): {}", path);
+    }
+
+    static void SaveRawRgbaToPngStatic(const uint8_t* bgraData, uint32_t width, uint32_t height, uint32_t stride, std::string path) {
+        const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_PNG);
+        if (!codec) {
+            spdlog::warn("PNG encoder not found, falling back to BMP for perfect quality");
+            if (path.size() > 4) path.replace(path.size() - 3, 3, "bmp");
+            SaveRawBgraToBmp(bgraData, width, height, stride, path);
+            return;
+        }
+
+        AVCodecContext* c = avcodec_alloc_context3(codec);
+        if (!c) return;
+
+        c->width = width;
+        c->height = height;
+        c->pix_fmt = AV_PIX_FMT_RGB24;
+        c->time_base = { 1, 1 };
+
+        if (avcodec_open2(c, codec, nullptr) < 0) {
+            avcodec_free_context(&c);
+            return;
+        }
+
+        AVFrame* frame = av_frame_alloc();
+        frame->format = c->pix_fmt;
+        frame->width = c->width;
+        frame->height = c->height;
+
+        if (av_image_alloc(frame->data, frame->linesize, width, height, c->pix_fmt, 32) < 0) {
+            av_frame_free(&frame);
+            avcodec_free_context(&c);
+            return;
+        }
+
+        SwsContext* sws = sws_getContext(width, height, AV_PIX_FMT_BGRA,
+                                       width, height, AV_PIX_FMT_RGB24,
+                                       SWS_LANCZOS, nullptr, nullptr, nullptr);
+
+        if (sws) {
+            const uint8_t* srcData[1] = { bgraData };
+            int srcLinesize[1] = { (int)stride };
+            sws_scale(sws, srcData, srcLinesize, 0, height, frame->data, frame->linesize);
+            sws_freeContext(sws);
+        }
+
+        AVPacket* pkt = av_packet_alloc();
+        if (avcodec_send_frame(c, frame) >= 0) {
+            std::ofstream ofs(path, std::ios::binary);
+            if (ofs) {
+                while (avcodec_receive_packet(c, pkt) >= 0) {
+                    ofs.write(reinterpret_cast<char*>(pkt->data), pkt->size);
+                    av_packet_unref(pkt);
+                }
+                ofs.close();
+                spdlog::info("Screenshot saved as PNG: {}", path);
+            }
+        }
+
+        av_packet_free(&pkt);
+        av_freep(&frame->data[0]);
+        av_frame_free(&frame);
+        avcodec_free_context(&c);
+    }
     bool StartUSBRecording(const RecordingSettings& settings) {
         try {
             m_gpuInfo = m_gpuDetector->GetGPUByIndex(settings.gpuIndex);
@@ -208,6 +588,9 @@ private:
         m_settings.height = m_usbCapture->GetHeight();
         spdlog::info("USB Capture Resolution: {}x{}", m_settings.width, m_settings.height);
 
+        m_captureD3D11Device = m_sharedD3D11Device;
+        m_captureD3D11Context = m_sharedD3D11Context;
+
         // Initialize USB Audio
         if (settings.captureAudio) {
             auto usbVideoDevices = SimpleUSBCapture::EnumerateDevices();
@@ -236,7 +619,7 @@ private:
         }
 
         m_diskWriter = std::make_unique<DiskWriter>();
-        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata())) {
+        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata(), m_encoder->GetSoftwarePixelFormat())) {
             spdlog::error("Failed to initialize disk writer");
             CleanupOnFailure();
             return false;
@@ -384,7 +767,7 @@ private:
         }
 
         m_diskWriter = std::make_unique<DiskWriter>();
-        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata())) {
+        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata(), m_encoder->GetSoftwarePixelFormat())) {
             spdlog::error("Failed to initialize disk writer");
             CleanupOnFailure();
             return false;
@@ -471,9 +854,6 @@ private:
         USBFrame usbFrame;
         std::vector<EncodedPacket> encodedPackets;
 
-        // FIX: Wait for first frame to establish recording start time
-        bool firstFrame = true;
-
         while (m_recording) {
             bool gotFrame = false;
 
@@ -497,29 +877,79 @@ private:
                 }
             }
 
+            // Handle screenshot request - MUST be after getting a frame to have texture available
+            // but BEFORE potential 'continue' or errors to ensure responsiveness.
+            if (m_screenshotRequested && gotFrame && frame.texture) {
+                {
+                    std::lock_guard<std::mutex> lock(m_screenshotMutex);
+                    // Double check inside lock
+                    if (m_screenshotRequested) {
+                        // FIX: Use capture device/context for screenshot since frame texture is on that adapter
+                        SaveTextureAsPngAsync(m_captureD3D11Device, m_captureD3D11Context, frame.texture, m_screenshotPath);
+                        m_screenshotRequested = false;
+                    }
+                }
+                m_screenshotCv.notify_all();
+            }
+
             if (!gotFrame || !frame.texture) continue;
 
-            // FIX: Set recording start time on first frame for A/V sync
-            if (firstFrame) {
-                m_recordingStartTime = GetCurrentTimestampUs();
-                m_firstVideoTimestamp = frame.timestamp;
-                spdlog::info("Recording start time set: {} us, first video ts: {}",
-                    m_recordingStartTime.load(), m_firstVideoTimestamp.load());
-                firstFrame = false;
+            // Cross-adapter texture copy if needed
+            ComPtr<ID3D11Texture2D> originalTexture = frame.texture;
+            if (!m_isSameAdapter && !m_isUSBCapture) {
+                // Ensure we have a staging texture on the capture device
+                if (!m_captureStagingTexture) {
+                    D3D11_TEXTURE2D_DESC desc;
+                    frame.texture->GetDesc(&desc);
+                    desc.Usage = D3D11_USAGE_STAGING;
+                    desc.BindFlags = 0;
+                    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                    m_captureD3D11Device->CreateTexture2D(&desc, nullptr, &m_captureStagingTexture);
+                }
+
+                if (m_captureStagingTexture) {
+                    m_captureD3D11Context->CopyResource(m_captureStagingTexture.Get(), frame.texture.Get());
+                    m_captureD3D11Context->Flush(); // Ensure copy is finished before mapping
+
+                    D3D11_MAPPED_SUBRESOURCE mapped;
+                    HRESULT hr = m_captureD3D11Context->Map(m_captureStagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+                    if (SUCCEEDED(hr)) {
+                        if (!m_crossAdapterEncodeTexture) {
+                            D3D11_TEXTURE2D_DESC desc;
+                            frame.texture->GetDesc(&desc);
+                            desc.Usage = D3D11_USAGE_DEFAULT;
+                            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+                            desc.CPUAccessFlags = 0;
+                            m_sharedD3D11Device->CreateTexture2D(&desc, nullptr, &m_crossAdapterEncodeTexture);
+                        }
+
+                        if (m_crossAdapterEncodeTexture) {
+                            m_sharedD3D11Context->UpdateSubresource(m_crossAdapterEncodeTexture.Get(), 0, nullptr, mapped.pData, mapped.RowPitch, 0);
+                            frame.texture = m_crossAdapterEncodeTexture;
+                        }
+                        m_captureD3D11Context->Unmap(m_captureStagingTexture.Get(), 0);
+                    }
+                }
             }
 
             if (!m_encoder || !m_diskWriter) break;
 
-            // FIX: Calculate synchronized timestamp relative to recording start
-            uint64_t syncedTimestamp = m_recordingStartTime.load() + (frame.timestamp - m_firstVideoTimestamp.load());
-            frame.timestamp = syncedTimestamp;
-
             encodedPackets.clear();
             if (m_encoder->EncodeFrame(frame, encodedPackets)) {
+                // If this is a keyframe and we don't have extradata in DiskWriter yet, try to update it
+                if (frame.isKeyframe && m_diskWriter && !m_diskWriter->IsHeaderWritten()) {
+                    auto extradata = m_encoder->GetExtradata();
+                    if (!extradata.empty()) {
+                        m_diskWriter->UpdateVideoExtradata(extradata);
+                    }
+                }
+
                 for (auto& packet : encodedPackets) {
                     WriteTask task;
                     task.data = std::move(packet.data);
-                    task.timestamp = syncedTimestamp;  // FIX: Use synced timestamp
+                    // Use packet PTS as the task timestamp.
+                    // This is the original QPC timestamp of the frame.
+                    task.timestamp = static_cast<uint64_t>(packet.pts);
                     task.isVideo = true;
                     task.pts = packet.pts;
                     task.keyframe = packet.keyframe;
@@ -532,7 +962,7 @@ private:
                 m_usbCapture->ReturnTexture(usbFrame.texture);
             }
             else if (m_frameCapture) {
-                m_frameCapture->ReturnTexture(frame.texture);
+                m_frameCapture->ReturnTexture(originalTexture);
             }
         }
         spdlog::info("Processing thread exiting");
@@ -542,25 +972,10 @@ private:
         spdlog::info("Audio loop started");
         AudioPacket packet;
 
-        // FIX: Wait for video to establish start time
-        while (m_recording && m_recordingStartTime.load() == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
-        uint64_t firstAudioTimestamp = 0;
-        bool firstPacket = true;
-
         while (m_recording) {
             if (m_audioCapture && m_diskWriter && m_audioCapture->GetNextPacket(packet, 50)) {
-                // FIX: Sync audio to same clock as video
-                if (firstPacket) {
-                    firstAudioTimestamp = packet.timestamp;
-                    firstPacket = false;
-                }
-
-                // Calculate synced timestamp: recording start + elapsed audio time
-                uint64_t syncedTimestamp = m_recordingStartTime.load() + (packet.timestamp - firstAudioTimestamp);
-                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), syncedTimestamp);
+                // USE RAW CAPTURE TIMESTAMP
+                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), packet.timestamp);
             }
         }
         spdlog::info("Audio loop exiting");
@@ -570,25 +985,10 @@ private:
         spdlog::info("USB audio loop started");
         USBAudioPacket packet;
 
-        // FIX: Wait for video to establish start time
-        while (m_recording && m_recordingStartTime.load() == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
-        uint64_t firstAudioTimestamp = 0;
-        bool firstPacket = true;
-
         while (m_recording) {
             if (m_usbAudioCapture && m_diskWriter && m_usbAudioCapture->GetNextPacket(packet, 50)) {
-                // FIX: Sync USB audio to same clock as video
-                if (firstPacket) {
-                    firstAudioTimestamp = packet.timestamp;
-                    firstPacket = false;
-                }
-
-                // Calculate synced timestamp: recording start + elapsed audio time
-                uint64_t syncedTimestamp = m_recordingStartTime.load() + (packet.timestamp - firstAudioTimestamp);
-                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), syncedTimestamp);
+                // USE RAW CAPTURE TIMESTAMP
+                m_diskWriter->QueueAudioData(packet.data.data(), packet.data.size(), packet.timestamp);
             }
         }
         spdlog::info("USB audio loop exiting");
@@ -624,6 +1024,7 @@ private:
     ComPtr<ID3D11Device> m_captureD3D11Device;
     ComPtr<ID3D11DeviceContext> m_captureD3D11Context;
     ComPtr<ID3D11Texture2D> m_crossAdapterEncodeTexture;
+    ComPtr<ID3D11Texture2D> m_captureStagingTexture;
 
     RecordingSettings m_settings;
     ExtendedGPUInfo m_gpuInfo;

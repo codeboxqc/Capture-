@@ -24,12 +24,12 @@ struct WriteTask {
 class DiskWriter {
 public:
     DiskWriter() : m_running(false), m_formatContext(nullptr), m_videoStream(nullptr), m_audioStream(nullptr),
-        m_headerWritten(false), m_startTimestamp(0), m_bytesWritten(0), m_framesWritten(0), m_audioPacketsWritten(0) {
+        m_headerWritten(false), m_startTimestamp(-1), m_bytesWritten(0), m_framesWritten(0), m_audioPacketsWritten(0) {
     }
 
     ~DiskWriter() { StopWriter(); }
 
-    bool Initialize(const RecordingSettings& settings, const std::vector<uint8_t>& extradata = {}) {
+    bool Initialize(const RecordingSettings& settings, const std::vector<uint8_t>& extradata = {}, AVPixelFormat pixelFormat = AV_PIX_FMT_YUV420P) {
         m_settings = settings;
         m_outputPath = settings.outputPath;
         m_outputPath.replace_extension(".mkv");
@@ -62,7 +62,14 @@ public:
             (settings.codec == Codec::AV1) ? AV_CODEC_ID_AV1 : AV_CODEC_ID_HEVC;
         m_videoStream->codecpar->width = settings.width;
         m_videoStream->codecpar->height = settings.height;
-        m_videoStream->codecpar->format = AV_PIX_FMT_YUV420P;
+
+        // Match encoder pixel format (important for 4:4:4)
+        m_videoStream->codecpar->format = pixelFormat;
+
+        m_videoStream->avg_frame_rate = { static_cast<int>(settings.fps), 1 };
+        m_videoStream->r_frame_rate = m_videoStream->avg_frame_rate;
+
+        // Use millisecond timebase for better player compatibility
         m_videoStream->time_base = { 1, 1000 };
 
         if (!extradata.empty()) {
@@ -75,6 +82,9 @@ public:
                 spdlog::warn("Failed to allocate extradata buffer");
             }
         }
+
+        // Explicitly set video timebase to avoid automatic rescaling issues
+        m_videoStream->time_base = { 1, 1000 };
 
         // 2. Audio Stream Configuration
         if (settings.captureAudio) {
@@ -137,8 +147,12 @@ public:
                 lock.unlock();
 
                 if (!m_headerWritten) {
-                    if (task.isVideo && task.keyframe) {
+                    // We MUST start with a video keyframe to avoid scramble/grey frames in VLC.
+                    // Also wait for valid extradata (SPS/PPS) to ensure playable MKV headers.
+                    if (task.isVideo && task.keyframe && m_videoStream->codecpar->extradata_size > 0) {
+                        // Anchoring start to EXACT timestamp of the first keyframe
                         m_startTimestamp = task.timestamp;
+
                         int ret = avformat_write_header(m_formatContext, nullptr);
                         if (ret < 0) {
                             char errBuf[AV_ERROR_MAX_STRING_SIZE];
@@ -147,19 +161,12 @@ public:
                             continue;
                         }
                         m_headerWritten = true;
-                        spdlog::info("MKV header written, recording started");
-                    } else if (!task.isVideo && m_bytesWritten > 0) {
-                        // Allow audio to trigger header if video is late, but prefer video keyframe
-                        int ret = avformat_write_header(m_formatContext, nullptr);
-                        if (ret >= 0) {
-                            m_headerWritten = true;
-                            spdlog::info("MKV header written (audio triggered)");
-                        }
-                    } else if (!task.isVideo && m_startTimestamp == 0) {
-                         m_startTimestamp = task.timestamp;
+                        spdlog::info("MKV header written anchored to video keyframe: {}", m_startTimestamp);
+                    } else {
+                        // Drop everything until the first video keyframe arrives.
+                        // This ensures the video is immediately seekable and has no scrambled start.
+                        continue;
                     }
-                    
-                    if (!m_headerWritten) continue; // Drop until header is written
                 }
 
                 (task.isVideo) ? WriteVideo(task) : WriteAudio(task);
@@ -206,14 +213,14 @@ public:
         m_videoStream = nullptr;
         m_audioStream = nullptr;
         m_headerWritten = false;
-        m_startTimestamp = 0;
+        m_startTimestamp = -1;
     }
 
     void QueueWriteTask(WriteTask&& task) {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         
         // FIX: Warn if queue is getting too large (potential bottleneck)
-        if (m_taskQueue.size() > 500) {
+        if (m_taskQueue.size() > 1000) {
             static uint64_t lastWarnTime = 0;
             uint64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -250,6 +257,21 @@ public:
     
     bool IsHeaderWritten() const { return m_headerWritten; }
 
+    void UpdateVideoExtradata(const std::vector<uint8_t>& extradata) {
+        if (!m_videoStream || m_headerWritten) return;
+
+        if (m_videoStream->codecpar->extradata) {
+            av_free(m_videoStream->codecpar->extradata);
+        }
+
+        m_videoStream->codecpar->extradata = (uint8_t*)av_mallocz(extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (m_videoStream->codecpar->extradata) {
+            memcpy(m_videoStream->codecpar->extradata, extradata.data(), extradata.size());
+            m_videoStream->codecpar->extradata_size = (int)extradata.size();
+            spdlog::info("Video extradata updated ({} bytes)", extradata.size());
+        }
+    }
+
 private:
     void CleanupContext() {
         if (m_formatContext) {
@@ -264,6 +286,8 @@ private:
     }
 
     void WriteVideo(WriteTask& task) {
+        if (m_startTimestamp == (uint64_t)-1 || task.timestamp < m_startTimestamp) return;
+
         AVPacket* pkt = av_packet_alloc();
         if (!pkt) {
             spdlog::error("Failed to allocate video packet");
@@ -280,11 +304,20 @@ private:
         memcpy(pkt->data, task.data.data(), task.data.size());
 
         pkt->stream_index = m_videoStream->index;
+
+        // Convert microsecond capture timestamp to millisecond stream timestamp
+        // Anchor relative to start of recording
         int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
-        pkt->pts = pkt->dts = av_rescale_q(pts_us, { 1, 1000000 }, m_videoStream->time_base);
+        pkt->pts = av_rescale_q(pts_us, { 1, 1000000 }, m_videoStream->time_base);
+        pkt->dts = pkt->pts;
+
+        // Help VLC calculate duration by setting packet duration (1/FPS in stream timebase)
+        pkt->duration = av_rescale_q(1, m_videoStream->r_frame_rate, m_videoStream->time_base);
 
         if (task.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
 
+        // Switched back to interleaved_write_frame to ensure correct Matroska packet order
+        // and duration calculation by the muxer.
         ret = av_interleaved_write_frame(m_formatContext, pkt);
         if (ret < 0) {
             // FIX: Don't spam logs, just count errors
@@ -302,7 +335,7 @@ private:
     }
 
     void WriteAudio(WriteTask& task) {
-        if (task.timestamp < m_startTimestamp) return;
+        if (m_startTimestamp == -1 || task.timestamp < m_startTimestamp) return;
         if (!m_audioStream) return;  // FIX: Extra safety check
 
         AVPacket* pkt = av_packet_alloc();

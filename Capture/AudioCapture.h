@@ -191,11 +191,17 @@ private:
                 UINT32 numFramesAvailable = 0;
                 DWORD flags = 0;
 
-                hr = m_captureClient->GetBuffer(&data, &numFramesAvailable, &flags, nullptr, nullptr);
+                UINT64 devPos = 0, qpcPos = 0;
+                hr = m_captureClient->GetBuffer(&data, &numFramesAvailable, &flags, &devPos, &qpcPos);
 
                 if (SUCCEEDED(hr)) {
                     AudioPacket packet;
-                    packet.timestamp = GetTimestamp();
+
+                    // Use QPC timestamp for high-precision A/V sync
+                    LARGE_INTEGER qpcFreq;
+                    QueryPerformanceFrequency(&qpcFreq);
+                    packet.timestamp = (qpcPos * 1000000) / qpcFreq.QuadPart;
+
                     packet.sampleCount = numFramesAvailable;
                     packet.bytesPerSample = m_bytesPerSample;
 

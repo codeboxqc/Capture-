@@ -10,6 +10,9 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <mutex>
+#include <thread>
+#include <atomic>
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -25,13 +28,15 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 extern void EnableLargePages();
 
-std::unique_ptr<IRecordingEngine> g_engine;
+std::shared_ptr<IRecordingEngine> g_engine;
+std::mutex g_engineMutex;
 RecordingSettings g_settings;
 std::vector<ExtendedGPUInfo> g_availableGPUs;
-bool g_recording = false;
+std::atomic<bool> g_recording{ false };
 bool g_showSettings = true;
 PerformanceMetrics g_metrics;
 std::string g_statusMessage = "Ready";
+std::mutex g_statusMutex;
 char g_outputPath[512] = "C:\\Recordings\\capture.hevc";
 float g_ramBufferSizeGB = 4.0f;
 float g_bitrateMbps = 50.0f;
@@ -283,13 +288,23 @@ public:
             return 1;
         }
 
-        g_engine = CreateRecordingEngine();
-        g_engine->SetStatusCallback([](const std::string& msg) { g_statusMessage = msg; });
-        g_engine->SetErrorCallback([](const std::string& msg) { g_statusMessage = "ERROR: " + msg; });
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            g_engine = CreateRecordingEngine();
+            g_engine->SetStatusCallback([](const std::string& msg) {
+                std::lock_guard<std::mutex> lock(g_statusMutex);
+                g_statusMessage = msg;
+            });
+            g_engine->SetErrorCallback([](const std::string& msg) {
+                std::lock_guard<std::mutex> lock(g_statusMutex);
+                g_statusMessage = "ERROR: " + msg;
+            });
 
-        if (!g_engine->Initialize()) {
-            Cleanup();
-            return 1;
+            if (!g_engine->Initialize()) {
+                g_engine.reset();
+                Cleanup();
+                return 1;
+            }
         }
 
         DetectGPUs();
@@ -427,8 +442,11 @@ private:
 
     void RenderFrame() {
         // Automatically sync UI if the backend engine auto-stopped due to the time limit
-        if (g_recording && g_engine && !g_engine->IsRecording()) {
-            g_recording = false;
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            if (g_recording && g_engine && !g_engine->IsRecording()) {
+                g_recording = false;
+            }
         }
 
         // Check for scheduled recording
@@ -448,6 +466,13 @@ private:
         ImGui::SetNextWindowPos(viewport->WorkPos);
         ImGui::SetNextWindowSize(viewport->WorkSize);
         ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+        // Thread-safe access to status message
+        std::string statusMsg;
+        {
+            std::lock_guard<std::mutex> lock(g_statusMutex);
+            statusMsg = g_statusMessage;
+        }
 
         if (ImGui::Begin("Recording Engine Control Panel", nullptr, windowFlags)) {
 
@@ -483,7 +508,7 @@ private:
 
                     ImGui::SameLine();
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
-                    ImGui::Text("  |  %s", g_statusMessage.c_str());
+                    ImGui::Text("  |  %s", statusMsg.c_str());
                     ImGui::PopStyleColor();
 
                     ImGui::Spacing();
@@ -526,6 +551,17 @@ private:
                         if (ImGui::Button("STOP RECORDING", buttonSize)) { StopRecording(); }
                         ImGui::PopStyleColor(3);
                     }
+
+                    ImGui::SameLine();
+
+                    // Screenshot Button
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.85f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.25f, 1.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.10f, 0.65f, 1.0f));
+                    if (ImGui::Button("TAKE SCREENSHOT", ImVec2(180, 40))) {
+                        TakeScreenshot();
+                    }
+                    ImGui::PopStyleColor(3);
 
                     ImGui::Spacing();
                     ImGui::Spacing();
@@ -877,8 +913,77 @@ private:
         g_pSwapChain->Present(1, 0);
     }
 
+    void SetStatus(const std::string& msg) {
+        std::lock_guard<std::mutex> lock(g_statusMutex);
+        g_statusMessage = msg;
+    }
+
+    void TakeScreenshot() {
+        std::shared_ptr<IRecordingEngine> engine;
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            engine = g_engine;
+        }
+        if (!engine) return;
+
+        // Sync current UI selections to settings for single-frame capture
+        g_settings.gpuIndex = m_selectedGPU;
+        g_settings.displayIndex = m_selectedDisplay;
+        g_settings.usbDeviceIndex = m_selectedUSBDevice;
+        engine->UpdateSettings(g_settings);
+
+        std::string currentOutputPath = g_outputPath;
+        std::filesystem::path outputPath(currentOutputPath);
+        std::filesystem::path folderPath = outputPath.parent_path();
+
+        // Ensure folder exists
+        if (!std::filesystem::exists(folderPath)) {
+            try {
+                std::filesystem::create_directories(folderPath);
+            } catch (...) {
+                SetStatus("Error: Could not create directory");
+                return;
+            }
+        }
+
+        std::string screenshotBase = (folderPath / "screenshot.png").string();
+        std::string uniquePath = GetUniqueFilename(screenshotBase);
+
+        SetStatus("Capturing screenshot...");
+
+        // Run in a separate thread to prevent UI hang
+        // We use a lambda that doesn't capture 'this' to avoid use-after-free
+        std::thread([engine, uniquePath]() {
+            bool success = engine->CaptureScreenshot(uniquePath);
+
+            if (success) {
+                std::string filename = std::filesystem::path(uniquePath).filename().string();
+                // Check if it might have fallen back to BMP
+                if (!std::filesystem::exists(uniquePath)) {
+                    std::string bmpPath = uniquePath;
+                    if (bmpPath.size() > 4) bmpPath.replace(bmpPath.size() - 3, 3, "bmp");
+                    if (std::filesystem::exists(bmpPath)) {
+                        filename = std::filesystem::path(bmpPath).filename().string();
+                    }
+                }
+
+                // Use the global mutex-protected status update
+                std::lock_guard<std::mutex> lock(g_statusMutex);
+                g_statusMessage = "Screenshot saved: " + filename;
+            } else {
+                std::lock_guard<std::mutex> lock(g_statusMutex);
+                g_statusMessage = "Failed to take screenshot";
+            }
+        }).detach();
+    }
+
     void StartRecording() {
-        if (!g_engine) return;
+        std::shared_ptr<IRecordingEngine> engine;
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            engine = g_engine;
+        }
+        if (!engine) return;
 
         // Auto-correct the file extension based on the selected codec
         std::string currentPath = g_outputPath;
@@ -950,21 +1055,33 @@ private:
         g_settings.ramBufferSize = static_cast<uint64_t>(g_ramBufferSizeGB * 1024.0f * 1024.0f * 1024.0f);
         g_settings.bitrate = static_cast<uint32_t>(g_bitrateMbps * 1000000.0f);
 
-        if (g_engine->StartRecording(g_settings)) {
+        if (engine->StartRecording(g_settings)) {
             g_recording = true;
             g_recordingStartTime = std::chrono::system_clock::now();
         }
     }
 
     void StopRecording() {
-        if (g_engine) {
-            g_engine->StopRecording();
+        std::shared_ptr<IRecordingEngine> engine;
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            engine = g_engine;
+        }
+        if (engine) {
+            engine->StopRecording();
             g_recording = false;
         }
     }
 
     void Cleanup() {
-        if (g_engine) { g_engine->StopRecording(); g_engine->Shutdown(); g_engine.reset(); }
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            if (g_engine) {
+                g_engine->StopRecording();
+                g_engine->Shutdown();
+                g_engine.reset();
+            }
+        }
         ImGui_ImplDX11_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
         CleanupDeviceD3D(); ::DestroyWindow(m_hWnd);
     }
