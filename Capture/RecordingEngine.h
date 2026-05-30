@@ -122,6 +122,27 @@ struct RecordingSettings {
     uint32_t gpuIndex = 0;
     uint32_t displayIndex = 0;
     int32_t usbDeviceIndex = -1;
+
+    // --- NEW: Quality Preset ---
+    // 0 = Lossless (QP 0), 1 = High (QP 5), 2 = Medium (QP 15), 3 = Low (QP 25)
+    uint32_t qualityPreset = 0;
+
+    // --- NEW: Cursor Options ---
+    bool showMouseCursor = true;
+    bool highlightCursor = true;
+    bool showClickAnimation = true;
+    float cursorHighlightRadius = 30.0f;
+
+    // Cursor highlight color (RGBA, 0-255)
+    uint8_t highlightColorR = 255;
+    uint8_t highlightColorG = 255;
+    uint8_t highlightColorB = 0;
+    uint8_t highlightColorA = 77;   // ~30% alpha
+
+    // Click animation color (RGB, 0-255)
+    uint8_t clickColorR = 255;
+    uint8_t clickColorG = 80;
+    uint8_t clickColorB = 80;
 };
 
 // ========== Performance Metrics ==========
@@ -150,6 +171,10 @@ public:
     virtual std::vector<ExtendedGPUInfo> GetAvailableGPUs() const = 0;
     virtual void SetStatusCallback(std::function<void(const std::string&)> callback) = 0;
     virtual void SetErrorCallback(std::function<void(const std::string&)> callback) = 0;
+    virtual void UpdateSettings(const RecordingSettings& settings) = 0;
+
+    // --- NEW FEATURE: SCREENSHOT CAPTURE ---
+    virtual bool CaptureScreenshot(const std::string& outputPath) = 0;
 };
 
 std::unique_ptr<IRecordingEngine> CreateRecordingEngine();

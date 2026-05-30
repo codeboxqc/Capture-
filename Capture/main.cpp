@@ -1,4 +1,4 @@
-﻿#include "RecordingEngine.h"
+#include "RecordingEngine.h"
 #include "RecordingPipeline.h"
 #include "GPUDetector.h"
 #include "VirtualDisplayManager.h"
@@ -10,6 +10,9 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <mutex>
+#include <thread>
+#include <atomic>
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -25,13 +28,15 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 extern void EnableLargePages();
 
-std::unique_ptr<IRecordingEngine> g_engine;
+std::shared_ptr<IRecordingEngine> g_engine;
+std::mutex g_engineMutex;
 RecordingSettings g_settings;
 std::vector<ExtendedGPUInfo> g_availableGPUs;
-bool g_recording = false;
+std::atomic<bool> g_recording{ false };
 bool g_showSettings = true;
 PerformanceMetrics g_metrics;
 std::string g_statusMessage = "Ready";
+std::mutex g_statusMutex;
 char g_outputPath[512] = "C:\\Recordings\\capture.hevc";
 float g_ramBufferSizeGB = 4.0f;
 float g_bitrateMbps = 50.0f;
@@ -49,6 +54,35 @@ std::chrono::system_clock::time_point g_recordingStartTime;
 std::chrono::system_clock::time_point g_scheduledStopTime;
 char g_currentTimerDisplay[64] = "00:00:00";
 bool g_scheduleActive = false;
+
+// === NEW: Quality Presets ===
+int g_qualityPreset = 0;  // 0=Lossless, 1=High, 2=Medium, 3=Low
+
+// === NEW: Mouse Cursor & Click Options ===
+bool g_showMouseCursor = true;
+bool g_highlightCursor = true;
+bool g_showClickAnimation = true;
+float g_cursorHighlightRadius = 30.0f;
+ImVec4 g_cursorHighlightColor = ImVec4(1.0f, 1.0f, 0.0f, 0.3f);  // Yellow transparent
+ImVec4 g_clickAnimationColor = ImVec4(1.0f, 0.3f, 0.3f, 0.6f);   // Red for click
+
+// === NEW: Hotkey IDs ===
+#define HOTKEY_START_STOP  1
+#define HOTKEY_SCREENSHOT  2
+#define HOTKEY_PAUSE       3
+
+// === NEW: Global HWND for hotkeys ===
+HWND g_mainHwnd = nullptr;
+
+// === NEW: Click animation state ===
+std::atomic<bool> g_leftClickActive{ false };
+std::atomic<bool> g_rightClickActive{ false };
+std::chrono::steady_clock::time_point g_lastClickTime;
+POINT g_lastClickPos = { 0, 0 };
+
+// === NEW: Hotkey trigger flags ===
+std::atomic<bool> g_hotkeyStartStop{ false };
+std::atomic<bool> g_hotkeyScreenshot{ false };
 
 ID3D11Device* g_pd3dDevice = nullptr;
 ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
@@ -82,12 +116,12 @@ std::string WStringToString(const std::wstring& wstr) {
 void OpenOutputFolder() {
     std::filesystem::path outputPath(g_outputPath);
     std::filesystem::path folderPath = outputPath.parent_path();
-    
+
     // Create folder if it doesn't exist
     if (!std::filesystem::exists(folderPath)) {
         std::filesystem::create_directories(folderPath);
     }
-    
+
     // Open folder in Explorer
     ShellExecuteW(nullptr, L"open", folderPath.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
@@ -95,16 +129,16 @@ void OpenOutputFolder() {
 // Generate unique filename with auto-increment if file exists
 std::string GetUniqueFilename(const std::string& basePath) {
     std::filesystem::path path(basePath);
-    
+
     if (!std::filesystem::exists(path)) {
         return basePath;  // File doesn't exist, use as-is
     }
-    
+
     // File exists, need to increment
     std::filesystem::path parent = path.parent_path();
     std::string stem = path.stem().string();
     std::string ext = path.extension().string();
-    
+
     // Remove existing number suffix if present (e.g., "capture_001" -> "capture")
     size_t underscorePos = stem.rfind('_');
     std::string baseStem = stem;
@@ -115,7 +149,7 @@ std::string GetUniqueFilename(const std::string& basePath) {
             baseStem = stem.substr(0, underscorePos);
         }
     }
-    
+
     // Find next available number
     int counter = 1;
     std::filesystem::path newPath;
@@ -125,7 +159,7 @@ std::string GetUniqueFilename(const std::string& basePath) {
         newPath = parent / (baseStem + numStr + ext);
         counter++;
     } while (std::filesystem::exists(newPath) && counter < 9999);
-    
+
     return newPath.string();
 }
 
@@ -283,18 +317,38 @@ public:
             return 1;
         }
 
-        g_engine = CreateRecordingEngine();
-        g_engine->SetStatusCallback([](const std::string& msg) { g_statusMessage = msg; });
-        g_engine->SetErrorCallback([](const std::string& msg) { g_statusMessage = "ERROR: " + msg; });
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            g_engine = CreateRecordingEngine();
+            g_engine->SetStatusCallback([](const std::string& msg) {
+                std::lock_guard<std::mutex> lock(g_statusMutex);
+                g_statusMessage = msg;
+                });
+            g_engine->SetErrorCallback([](const std::string& msg) {
+                std::lock_guard<std::mutex> lock(g_statusMutex);
+                g_statusMessage = "ERROR: " + msg;
+                });
 
-        if (!g_engine->Initialize()) {
-            Cleanup();
-            return 1;
+            if (!g_engine->Initialize()) {
+                g_engine.reset();
+                Cleanup();
+                return 1;
+            }
         }
 
         DetectGPUs();
         DetectDisplays();
         DetectUSBDevices();
+
+        // === NEW: Register Global Hotkeys ===
+        g_mainHwnd = m_hWnd;
+        if (!RegisterHotKey(m_hWnd, HOTKEY_START_STOP, 0, VK_F9)) {
+            spdlog::warn("Failed to register F9 hotkey for Start/Stop");
+        }
+        if (!RegisterHotKey(m_hWnd, HOTKEY_SCREENSHOT, 0, VK_F12)) {
+            spdlog::warn("Failed to register F12 hotkey for Screenshot");
+        }
+        spdlog::info("Hotkeys registered: F9=Start/Stop, F12=Screenshot");
 
         ShowWindow(m_hWnd, nCmdShow);
         UpdateWindow(m_hWnd);
@@ -426,9 +480,25 @@ private:
     }
 
     void RenderFrame() {
+        // === NEW: Handle hotkey triggers ===
+        if (g_hotkeyStartStop.exchange(false)) {
+            if (g_recording) {
+                StopRecording();
+            }
+            else {
+                StartRecording();
+            }
+        }
+        if (g_hotkeyScreenshot.exchange(false)) {
+            TakeScreenshot();
+        }
+
         // Automatically sync UI if the backend engine auto-stopped due to the time limit
-        if (g_recording && g_engine && !g_engine->IsRecording()) {
-            g_recording = false;
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            if (g_recording && g_engine && !g_engine->IsRecording()) {
+                g_recording = false;
+            }
         }
 
         // Check for scheduled recording
@@ -448,6 +518,13 @@ private:
         ImGui::SetNextWindowPos(viewport->WorkPos);
         ImGui::SetNextWindowSize(viewport->WorkSize);
         ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+        // Thread-safe access to status message
+        std::string statusMsg;
+        {
+            std::lock_guard<std::mutex> lock(g_statusMutex);
+            statusMsg = g_statusMessage;
+        }
 
         if (ImGui::Begin("Recording Engine Control Panel", nullptr, windowFlags)) {
 
@@ -483,7 +560,7 @@ private:
 
                     ImGui::SameLine();
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
-                    ImGui::Text("  |  %s", g_statusMessage.c_str());
+                    ImGui::Text("  |  %s", statusMsg.c_str());
                     ImGui::PopStyleColor();
 
                     ImGui::Spacing();
@@ -526,6 +603,17 @@ private:
                         if (ImGui::Button("STOP RECORDING", buttonSize)) { StopRecording(); }
                         ImGui::PopStyleColor(3);
                     }
+
+                    ImGui::SameLine();
+
+                    // Screenshot Button
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.85f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.25f, 1.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.10f, 0.65f, 1.0f));
+                    if (ImGui::Button("TAKE SCREENSHOT", ImVec2(180, 40))) {
+                        TakeScreenshot();
+                    }
+                    ImGui::PopStyleColor(3);
 
                     ImGui::Spacing();
                     ImGui::Spacing();
@@ -620,7 +708,7 @@ private:
                     ImGui::Text("OUTPUT");
                     ImGui::PopStyleColor();
                     ImGui::Spacing();
-                    
+
                     // Output path with Open Folder button
                     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 110);
                     ImGui::InputText("##OutputPath", g_outputPath, sizeof(g_outputPath));
@@ -637,14 +725,57 @@ private:
                     ImGui::Spacing();
                     ImGui::Spacing();
 
-                    // Resolution
+                    // === NEW: Quality Preset ===
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("QUALITY PRESET");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                    const char* qualityPresets[] = { "Lossless (Perfect)", "High (QP 5)", "Medium (QP 15)", "Low (QP 25)" };
+                    ImGui::SetNextItemWidth(250);
+                    if (ImGui::Combo("##Quality", &g_qualityPreset, qualityPresets, IM_ARRAYSIZE(qualityPresets))) {
+                        // Quality preset descriptions
+                        switch (g_qualityPreset) {
+                        case 0: g_statusMessage = "Lossless: Perfect quality, large files"; break;
+                        case 1: g_statusMessage = "High: Excellent quality, smaller files"; break;
+                        case 2: g_statusMessage = "Medium: Good quality, balanced size"; break;
+                        case 3: g_statusMessage = "Low: Smaller files, visible compression"; break;
+                        }
+                    }
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("Lossless recommended for screen recording");
+                    ImGui::PopStyleColor();
+
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    // Resolution (Auto-detected from source)
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
                     ImGui::Text("RESOLUTION");
                     ImGui::PopStyleColor();
                     ImGui::Spacing();
-                    const char* resolutions[] = { "1920x1080 (FHD)", "2560x1440 (QHD)", "3840x2160 (4K)", "7680x4320 (8K)" };
-                    ImGui::SetNextItemWidth(250);
-                    ImGui::Combo("##Resolution", &m_currentResolution, resolutions, IM_ARRAYSIZE(resolutions));
+
+                    // Show auto-detected resolution based on selected source
+                    std::string resolutionText = "Auto-detect from source";
+                    if (m_selectedUSBDevice >= 0 && m_selectedUSBDevice < (int)m_usbDeviceList.size()) {
+                        // USB device selected - show its resolution
+                        resolutionText = "USB: 1920x1080 (Auto)";
+                    }
+                    else if (m_selectedDisplay >= 0 && m_selectedDisplay < (int)m_displayList.size()) {
+                        // Display selected - show its resolution
+                        const auto& display = m_displayList[m_selectedDisplay];
+                        char buf[64];
+                        snprintf(buf, sizeof(buf), "%dx%d @ %dHz (Auto)",
+                            display.width, display.height, display.refreshRate);
+                        resolutionText = buf;
+                    }
+
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 0.9f, 0.3f, 1.0f));
+                    ImGui::Text("%s", resolutionText.c_str());
+                    ImGui::PopStyleColor();
+
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("(Always matches source device)");
+                    ImGui::PopStyleColor();
 
                     ImGui::Spacing();
                     ImGui::Spacing();
@@ -673,20 +804,6 @@ private:
                     ImGui::Spacing();
                     ImGui::Spacing();
 
-                    // Bitrate
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
-                    ImGui::Text("BITRATE");
-                    ImGui::PopStyleColor();
-                    ImGui::Spacing();
-                    ImGui::SetNextItemWidth(300);
-                    ImGui::SliderFloat("##Bitrate", &g_bitrateMbps, 5.0f, 500.0f, "%.1f Mbps");
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
-                    ImGui::Text("(CQP mode - bitrate serves as quality guide)");
-                    ImGui::PopStyleColor();
-
-                    ImGui::Spacing();
-                    ImGui::Spacing();
-
                     // RAM Buffer
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
                     ImGui::Text("RAM BUFFER");
@@ -698,7 +815,63 @@ private:
                     ImGui::EndTabItem();
                 }
 
-                // --- TAB 3: HARDWARE SELECTION ---
+                /*
+                // --- TAB 3: MOUSE & CURSOR ---
+                if (ImGui::BeginTabItem("  Cursor  ")) {
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("CURSOR OPTIONS");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
+                    ImGui::Checkbox("Show Mouse Cursor", &g_showMouseCursor);
+                    ImGui::Checkbox("Highlight Cursor (Yellow Circle)", &g_highlightCursor);
+                    ImGui::Checkbox("Show Click Animation", &g_showClickAnimation);
+
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    if (g_highlightCursor) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                        ImGui::Text("HIGHLIGHT SETTINGS");
+                        ImGui::PopStyleColor();
+                        ImGui::Spacing();
+
+                        ImGui::SetNextItemWidth(200);
+                        ImGui::SliderFloat("Highlight Radius", &g_cursorHighlightRadius, 10.0f, 100.0f, "%.0f px");
+
+                        ImGui::ColorEdit4("Highlight Color", (float*)&g_cursorHighlightColor, ImGuiColorEditFlags_AlphaBar);
+                    }
+
+                    if (g_showClickAnimation) {
+                        ImGui::Spacing();
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                        ImGui::Text("CLICK ANIMATION");
+                        ImGui::PopStyleColor();
+                        ImGui::Spacing();
+
+                        ImGui::ColorEdit4("Click Color", (float*)&g_clickAnimationColor, ImGuiColorEditFlags_AlphaBar);
+                    }
+
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+                    ImGui::TextWrapped("Note: Cursor highlight and click animations are rendered in the recorded video when enabled.");
+                    ImGui::PopStyleColor();
+
+                    ImGui::EndTabItem();
+                }
+                */
+
+
+
+
+
+                // --- TAB 4: HARDWARE SELECTION ---
                 if (ImGui::BeginTabItem("  Hardware  ")) {
                     ImGui::Spacing();
 
@@ -763,6 +936,8 @@ private:
 
                     ImGui::EndTabItem();
                 }
+
+                
 
                 // --- TAB 4: DIAGNOSTICS ---
                 if (ImGui::BeginTabItem("  Diagnostics  ")) {
@@ -864,6 +1039,52 @@ private:
                     ImGui::EndTabItem();
                 }
 
+                // --- TAB 6: HOTKEYS ---
+                if (ImGui::BeginTabItem("  Hotkeys  ")) {
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("GLOBAL HOTKEYS");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.9f, 0.3f, 1.0f));
+                    ImGui::Text("F9");
+                    ImGui::PopStyleColor();
+                    ImGui::SameLine(80);
+                    ImGui::Text("Start / Stop Recording");
+
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.9f, 0.3f, 1.0f));
+                    ImGui::Text("F12");
+                    ImGui::PopStyleColor();
+                    ImGui::SameLine(80);
+                    ImGui::Text("Take Screenshot");
+
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+                    ImGui::TextWrapped("Hotkeys work globally - you can use them even when this window is minimized or in the background.");
+                    ImGui::PopStyleColor();
+
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    // Hotkey status
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("STATUS");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 0.9f, 0.3f, 1.0f));
+                    ImGui::Text("Hotkeys Active");
+                    ImGui::PopStyleColor();
+
+                    ImGui::EndTabItem();
+                }
+
                 ImGui::EndTabBar();
             }
             ImGui::End();
@@ -877,8 +1098,98 @@ private:
         g_pSwapChain->Present(1, 0);
     }
 
+    void SetStatus(const std::string& msg) {
+        std::lock_guard<std::mutex> lock(g_statusMutex);
+        g_statusMessage = msg;
+    }
+
+    void TakeScreenshot() {
+        std::shared_ptr<IRecordingEngine> engine;
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            engine = g_engine;
+        }
+        if (!engine) return;
+
+        // Sync current UI selections to settings for single-frame capture
+        g_settings.gpuIndex = m_selectedGPU;
+        g_settings.displayIndex = m_selectedDisplay;
+        g_settings.usbDeviceIndex = m_selectedUSBDevice;
+        engine->UpdateSettings(g_settings);
+
+        std::string currentOutputPath = g_outputPath;
+        std::filesystem::path outputPath(currentOutputPath);
+        std::filesystem::path folderPath = outputPath.parent_path();
+
+        // Ensure folder exists
+        if (!std::filesystem::exists(folderPath)) {
+            try {
+                std::filesystem::create_directories(folderPath);
+            }
+            catch (...) {
+                SetStatus("Error: Could not create directory");
+                return;
+            }
+        }
+
+        // FIX: Find unique filename checking both PNG and BMP extensions
+        std::string uniquePath;
+        int counter = 1;
+        do {
+            if (counter == 1) {
+                uniquePath = (folderPath / "screenshot.png").string();
+            }
+            else {
+                char numStr[32];
+                snprintf(numStr, sizeof(numStr), "screenshot_%03d.png", counter);
+                uniquePath = (folderPath / numStr).string();
+            }
+
+            // Check both PNG and BMP versions
+            std::string bmpPath = uniquePath;
+            bmpPath.replace(bmpPath.size() - 3, 3, "bmp");
+
+            if (!std::filesystem::exists(uniquePath) && !std::filesystem::exists(bmpPath)) {
+                break;  // Found unique name
+            }
+            counter++;
+        } while (counter < 9999);
+
+        SetStatus("Capturing screenshot...");
+
+        // Run in a separate thread to prevent UI hang
+        std::thread([engine, uniquePath]() {
+            bool success = engine->CaptureScreenshot(uniquePath);
+
+            if (success) {
+                std::string filename = std::filesystem::path(uniquePath).filename().string();
+                // Check if it might have fallen back to BMP
+                if (!std::filesystem::exists(uniquePath)) {
+                    std::string bmpPath = uniquePath;
+                    if (bmpPath.size() > 4) bmpPath.replace(bmpPath.size() - 3, 3, "bmp");
+                    if (std::filesystem::exists(bmpPath)) {
+                        filename = std::filesystem::path(bmpPath).filename().string();
+                    }
+                }
+
+                // Use the global mutex-protected status update
+                std::lock_guard<std::mutex> lock(g_statusMutex);
+                g_statusMessage = "Screenshot saved: " + filename;
+            }
+            else {
+                std::lock_guard<std::mutex> lock(g_statusMutex);
+                g_statusMessage = "Failed to take screenshot";
+            }
+            }).detach();
+    }
+
     void StartRecording() {
-        if (!g_engine) return;
+        std::shared_ptr<IRecordingEngine> engine;
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            engine = g_engine;
+        }
+        if (!engine) return;
 
         // Auto-correct the file extension based on the selected codec
         std::string currentPath = g_outputPath;
@@ -899,7 +1210,7 @@ private:
             g_settings.codec = Codec::AV1;
             ext = ".mkv";
         }
-        
+
         currentPath = basePath + ext;
 
         // AUTO-INCREMENT: Get unique filename if file already exists
@@ -950,21 +1261,62 @@ private:
         g_settings.ramBufferSize = static_cast<uint64_t>(g_ramBufferSizeGB * 1024.0f * 1024.0f * 1024.0f);
         g_settings.bitrate = static_cast<uint32_t>(g_bitrateMbps * 1000000.0f);
 
-        if (g_engine->StartRecording(g_settings)) {
+        // === Pass FPS from dropdown ===
+        // frameRates[] = { "60 FPS", "120 FPS", "144 FPS", "240 FPS" }
+        switch (m_currentFps) {
+        case 0: g_settings.fps = 60; break;
+        case 1: g_settings.fps = 120; break;
+        case 2: g_settings.fps = 144; break;
+        case 3: g_settings.fps = 240; break;
+        default: g_settings.fps = 60; break;
+        }
+
+        // === NEW: Pass quality preset ===
+        g_settings.qualityPreset = g_qualityPreset;
+
+        // === NEW: Pass cursor options ===
+        g_settings.showMouseCursor = g_showMouseCursor;
+        g_settings.highlightCursor = g_highlightCursor;
+        g_settings.showClickAnimation = g_showClickAnimation;
+        g_settings.cursorHighlightRadius = g_cursorHighlightRadius;
+
+        // === Pass cursor colors (ImVec4 is 0-1 float, convert to 0-255) ===
+        g_settings.highlightColorR = static_cast<uint8_t>(g_cursorHighlightColor.x * 255.0f);
+        g_settings.highlightColorG = static_cast<uint8_t>(g_cursorHighlightColor.y * 255.0f);
+        g_settings.highlightColorB = static_cast<uint8_t>(g_cursorHighlightColor.z * 255.0f);
+        g_settings.highlightColorA = static_cast<uint8_t>(g_cursorHighlightColor.w * 255.0f);
+
+        g_settings.clickColorR = static_cast<uint8_t>(g_clickAnimationColor.x * 255.0f);
+        g_settings.clickColorG = static_cast<uint8_t>(g_clickAnimationColor.y * 255.0f);
+        g_settings.clickColorB = static_cast<uint8_t>(g_clickAnimationColor.z * 255.0f);
+
+        if (engine->StartRecording(g_settings)) {
             g_recording = true;
             g_recordingStartTime = std::chrono::system_clock::now();
         }
     }
 
     void StopRecording() {
-        if (g_engine) {
-            g_engine->StopRecording();
+        std::shared_ptr<IRecordingEngine> engine;
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            engine = g_engine;
+        }
+        if (engine) {
+            engine->StopRecording();
             g_recording = false;
         }
     }
 
     void Cleanup() {
-        if (g_engine) { g_engine->StopRecording(); g_engine->Shutdown(); g_engine.reset(); }
+        {
+            std::lock_guard<std::mutex> lock(g_engineMutex);
+            if (g_engine) {
+                g_engine->StopRecording();
+                g_engine->Shutdown();
+                g_engine.reset();
+            }
+        }
         ImGui_ImplDX11_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
         CleanupDeviceD3D(); ::DestroyWindow(m_hWnd);
     }
@@ -986,8 +1338,28 @@ void CleanupRenderTarget() { if (g_mainRenderTargetView) { g_mainRenderTargetVie
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) return true;
     switch (msg) {
-    case WM_SIZE: if (g_pd3dDevice != nullptr && wParam != SIZE_MINIMIZED) { CleanupRenderTarget(); g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0); CreateRenderTarget(); } return 0;
-    case WM_DESTROY: ::PostQuitMessage(0); return 0;
+    case WM_SIZE:
+        if (g_pd3dDevice != nullptr && wParam != SIZE_MINIMIZED) {
+            CleanupRenderTarget();
+            g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
+            CreateRenderTarget();
+        }
+        return 0;
+    case WM_DESTROY:
+        // Unregister hotkeys on exit
+        UnregisterHotKey(hWnd, HOTKEY_START_STOP);
+        UnregisterHotKey(hWnd, HOTKEY_SCREENSHOT);
+        ::PostQuitMessage(0);
+        return 0;
+    case WM_HOTKEY:
+        // Handle global hotkeys via flags (processed in RenderFrame)
+        if (wParam == HOTKEY_START_STOP) {
+            g_hotkeyStartStop = true;
+        }
+        else if (wParam == HOTKEY_SCREENSHOT) {
+            g_hotkeyScreenshot = true;
+        }
+        return 0;
     }
     return ::DefWindowProcW(hWnd, msg, wParam, lParam);
 }

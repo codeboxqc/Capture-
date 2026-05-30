@@ -24,17 +24,18 @@ struct WriteTask {
 class DiskWriter {
 public:
     DiskWriter() : m_running(false), m_formatContext(nullptr), m_videoStream(nullptr), m_audioStream(nullptr),
-        m_headerWritten(false), m_startTimestamp(0), m_bytesWritten(0), m_framesWritten(0), m_audioPacketsWritten(0) {
+        m_headerWritten(false), m_startTimestamp(0), m_lastVideoTimestamp(0), m_bytesWritten(0), m_framesWritten(0), m_audioPacketsWritten(0),
+        m_lastVideoPts(-1), m_lastAudioPts(-1), m_fps(60), m_firstVideoReceived(false) {
     }
 
     ~DiskWriter() { StopWriter(); }
 
-    bool Initialize(const RecordingSettings& settings, const std::vector<uint8_t>& extradata = {}) {
+    bool Initialize(const RecordingSettings& settings, const std::vector<uint8_t>& extradata = {}, AVPixelFormat pixelFormat = AV_PIX_FMT_YUV420P) {
         m_settings = settings;
+        m_fps = settings.fps;
         m_outputPath = settings.outputPath;
         m_outputPath.replace_extension(".mkv");
-        
-        // FIX: Check if parent path exists before creating
+
         if (!m_outputPath.parent_path().empty()) {
             std::error_code ec;
             std::filesystem::create_directories(m_outputPath.parent_path(), ec);
@@ -56,23 +57,24 @@ public:
             CleanupContext();
             return false;
         }
-        
+
         m_videoStream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
         m_videoStream->codecpar->codec_id = (settings.codec == Codec::H264) ? AV_CODEC_ID_H264 :
             (settings.codec == Codec::AV1) ? AV_CODEC_ID_AV1 : AV_CODEC_ID_HEVC;
         m_videoStream->codecpar->width = settings.width;
         m_videoStream->codecpar->height = settings.height;
-        m_videoStream->codecpar->format = AV_PIX_FMT_YUV420P;
+        m_videoStream->codecpar->format = pixelFormat;
+
+        // FIX: Use millisecond timebase - VLC handles this well
         m_videoStream->time_base = { 1, 1000 };
+        m_videoStream->avg_frame_rate = { static_cast<int>(settings.fps), 1 };
+        m_videoStream->r_frame_rate = m_videoStream->avg_frame_rate;
 
         if (!extradata.empty()) {
-            // FIX: Check allocation success
             m_videoStream->codecpar->extradata = (uint8_t*)av_mallocz(extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE);
             if (m_videoStream->codecpar->extradata) {
                 memcpy(m_videoStream->codecpar->extradata, extradata.data(), extradata.size());
                 m_videoStream->codecpar->extradata_size = (int)extradata.size();
-            } else {
-                spdlog::warn("Failed to allocate extradata buffer");
             }
         }
 
@@ -84,7 +86,7 @@ public:
                 CleanupContext();
                 return false;
             }
-            
+
             m_audioStream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
             m_audioStream->codecpar->codec_id = AV_CODEC_ID_PCM_F32LE;
             m_audioStream->codecpar->format = AV_SAMPLE_FMT_FLT;
@@ -108,7 +110,7 @@ public:
                 return false;
             }
         }
-        
+
         spdlog::info("DiskWriter initialized: {}", m_outputPath.string());
         return true;
     }
@@ -121,24 +123,48 @@ public:
         m_audioStream->codecpar->bits_per_coded_sample = bitsPerSample;
         m_audioStream->codecpar->block_align = channels * (bitsPerSample / 8);
         m_audioStream->time_base = { 1, (int)sampleRate };
-        
+
         spdlog::info("Audio format set: {}Hz / {}-bit / {} channels", sampleRate, bitsPerSample, channels);
     }
 
     bool StartWriter() {
         m_running = true;
+        m_lastVideoTimestamp = 0;
         m_writerThread = std::thread([this]() {
-            while (m_running || !m_taskQueue.empty()) {
+            while (true) {
                 std::unique_lock<std::mutex> lock(m_queueMutex);
                 m_taskAvailable.wait(lock, [this] { return !m_taskQueue.empty() || !m_running; });
-                if (m_taskQueue.empty()) break;
+
+                // FIX: Exit immediately when stopped - don't drain remaining queue
+                // This prevents audio from extending past video
+                if (!m_running) {
+                    size_t remaining = m_taskQueue.size();
+                    if (remaining > 0) {
+                        spdlog::info("Stopping writer, discarding {} queued tasks", remaining);
+                    }
+                    break;
+                }
+
+                if (m_taskQueue.empty()) continue;
+
                 WriteTask task = std::move(m_taskQueue.front());
                 m_taskQueue.pop();
                 lock.unlock();
 
+                // Set start timestamp from FIRST packet
+                if (m_startTimestamp == 0 && task.timestamp > 0) {
+                    m_startTimestamp = task.timestamp;
+                    spdlog::info("Recording start timestamp set: {}", m_startTimestamp);
+                }
+
+                // Track last video timestamp
+                if (task.isVideo) {
+                    m_lastVideoTimestamp = task.timestamp;
+                }
+
                 if (!m_headerWritten) {
-                    if (task.isVideo && task.keyframe) {
-                        m_startTimestamp = task.timestamp;
+                    // We MUST start with a video keyframe with valid extradata
+                    if (task.isVideo && task.keyframe && m_videoStream->codecpar->extradata_size > 0) {
                         int ret = avformat_write_header(m_formatContext, nullptr);
                         if (ret < 0) {
                             char errBuf[AV_ERROR_MAX_STRING_SIZE];
@@ -147,28 +173,35 @@ public:
                             continue;
                         }
                         m_headerWritten = true;
-                        spdlog::info("MKV header written, recording started");
-                    } else if (!task.isVideo && m_bytesWritten > 0) {
-                        // Allow audio to trigger header if video is late, but prefer video keyframe
-                        int ret = avformat_write_header(m_formatContext, nullptr);
-                        if (ret >= 0) {
-                            m_headerWritten = true;
-                            spdlog::info("MKV header written (audio triggered)");
-                        }
-                    } else if (!task.isVideo && m_startTimestamp == 0) {
-                         m_startTimestamp = task.timestamp;
+                        m_firstVideoReceived = true;
+                        spdlog::info("MKV header written, start timestamp: {}", m_startTimestamp);
                     }
-                    
-                    if (!m_headerWritten) continue; // Drop until header is written
+                    else {
+                        // Queue audio until first video keyframe arrives
+                        if (!task.isVideo) {
+                            m_pendingAudio.push(std::move(task));
+                            if (m_pendingAudio.size() > 500) {
+                                m_pendingAudio.pop();
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Write any pending audio packets after header is written
+                    while (!m_pendingAudio.empty()) {
+                        WriteTask audioTask = std::move(m_pendingAudio.front());
+                        m_pendingAudio.pop();
+                        WriteAudio(audioTask);
+                    }
                 }
 
                 (task.isVideo) ? WriteVideo(task) : WriteAudio(task);
             }
-            
+
             spdlog::info("Writer thread stopped. Frames: {}, Audio packets: {}, Bytes: {}",
                 m_framesWritten.load(), m_audioPacketsWritten.load(), m_bytesWritten.load());
-        });
-        
+            });
+
         SetThreadPriority(m_writerThread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
         return true;
     }
@@ -176,13 +209,28 @@ public:
     void StopWriter() {
         m_running = false;
         m_taskAvailable.notify_all();
-        
+
         if (m_writerThread.joinable()) {
             m_writerThread.join();
         }
-        
+
         if (m_formatContext) {
             if (m_headerWritten) {
+                // FIX: Clear any remaining tasks in queue to prevent audio overrun
+                // This prevents audio from extending past the last video frame
+                {
+                    std::lock_guard<std::mutex> lock(m_queueMutex);
+                    size_t discarded = m_taskQueue.size();
+                    if (discarded > 0) {
+                        spdlog::info("Discarding {} queued tasks at stop", discarded);
+                        std::queue<WriteTask> empty;
+                        std::swap(m_taskQueue, empty);
+                    }
+                }
+
+                // Flush buffered packets
+                av_interleaved_write_frame(m_formatContext, nullptr);
+
                 int ret = av_write_trailer(m_formatContext);
                 if (ret < 0) {
                     spdlog::warn("Failed to write trailer");
@@ -194,43 +242,47 @@ public:
             avformat_free_context(m_formatContext);
             m_formatContext = nullptr;
         }
-        
-        // FIX: Clear queue to free memory
+
         {
             std::lock_guard<std::mutex> lock(m_queueMutex);
             std::queue<WriteTask> empty;
             std::swap(m_taskQueue, empty);
         }
-        
-        // FIX: Reset state for potential reuse
+
         m_videoStream = nullptr;
         m_audioStream = nullptr;
         m_headerWritten = false;
         m_startTimestamp = 0;
+        m_lastVideoPts = -1;
+        m_lastAudioPts = -1;
+        m_firstVideoReceived = false;
+
+        // Clear pending audio queue
+        std::queue<WriteTask> emptyAudio;
+        std::swap(m_pendingAudio, emptyAudio);
     }
 
     void QueueWriteTask(WriteTask&& task) {
         std::lock_guard<std::mutex> lock(m_queueMutex);
-        
-        // FIX: Warn if queue is getting too large (potential bottleneck)
-        if (m_taskQueue.size() > 500) {
+
+        if (m_taskQueue.size() > 1000) {
             static uint64_t lastWarnTime = 0;
             uint64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (now - lastWarnTime > 5) {  // Warn at most every 5 seconds
+            if (now - lastWarnTime > 5) {
                 spdlog::warn("Write queue backing up: {} tasks pending", m_taskQueue.size());
                 lastWarnTime = now;
             }
         }
-        
+
         m_taskQueue.push(std::move(task));
         m_taskAvailable.notify_one();
     }
 
     void QueueAudioData(const uint8_t* data, size_t size, uint64_t timestamp) {
         if (!m_audioStream) return;
-        if (!data || size == 0) return;  // FIX: Validate input
-        
+        if (!data || size == 0) return;
+
         WriteTask task;
         task.data.assign(data, data + size);
         task.timestamp = timestamp;
@@ -242,13 +294,28 @@ public:
     uint64_t GetBytesWritten() const { return m_bytesWritten.load(); }
     uint64_t GetFramesWritten() const { return m_framesWritten.load(); }
     uint64_t GetAudioPacketsWritten() const { return m_audioPacketsWritten.load(); }
-    
+
     size_t GetQueueSize() const {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         return m_taskQueue.size();
     }
-    
+
     bool IsHeaderWritten() const { return m_headerWritten; }
+
+    void UpdateVideoExtradata(const std::vector<uint8_t>& extradata) {
+        if (!m_videoStream || m_headerWritten) return;
+
+        if (m_videoStream->codecpar->extradata) {
+            av_free(m_videoStream->codecpar->extradata);
+        }
+
+        m_videoStream->codecpar->extradata = (uint8_t*)av_mallocz(extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (m_videoStream->codecpar->extradata) {
+            memcpy(m_videoStream->codecpar->extradata, extradata.data(), extradata.size());
+            m_videoStream->codecpar->extradata_size = (int)extradata.size();
+            spdlog::info("Video extradata updated ({} bytes)", extradata.size());
+        }
+    }
 
 private:
     void CleanupContext() {
@@ -264,89 +331,93 @@ private:
     }
 
     void WriteVideo(WriteTask& task) {
+        if (task.timestamp < m_startTimestamp) return;
+
         AVPacket* pkt = av_packet_alloc();
         if (!pkt) {
             spdlog::error("Failed to allocate video packet");
             return;
         }
-        
+
         int ret = av_new_packet(pkt, (int)task.data.size());
         if (ret < 0) {
-            spdlog::error("Failed to allocate packet data");
             av_packet_free(&pkt);
             return;
         }
-        
-        memcpy(pkt->data, task.data.data(), task.data.size());
 
+        memcpy(pkt->data, task.data.data(), task.data.size());
         pkt->stream_index = m_videoStream->index;
-        int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
-        pkt->pts = pkt->dts = av_rescale_q(pts_us, { 1, 1000000 }, m_videoStream->time_base);
+
+        // FIX: Calculate PTS in milliseconds from recording start
+        int64_t elapsed_us = static_cast<int64_t>(task.timestamp - m_startTimestamp);
+        int64_t pts_ms = elapsed_us / 1000;  // Convert to milliseconds
+
+        // FIX: Ensure strictly monotonic PTS
+        if (pts_ms <= m_lastVideoPts) {
+            pts_ms = m_lastVideoPts + 1;
+        }
+        m_lastVideoPts = pts_ms;
+
+        pkt->pts = pts_ms;
+        pkt->dts = pts_ms;
+
+        // FIX: Set duration based on FPS (in milliseconds)
+        pkt->duration = 1000 / m_fps;
 
         if (task.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
 
         ret = av_interleaved_write_frame(m_formatContext, pkt);
-        if (ret < 0) {
-            // FIX: Don't spam logs, just count errors
-            static std::atomic<uint64_t> videoWriteErrors{0};
-            videoWriteErrors++;
-            if (videoWriteErrors % 100 == 1) {
-                spdlog::warn("Video write errors: {}", videoWriteErrors.load());
-            }
-        } else {
+        if (ret >= 0) {
             m_bytesWritten += pkt->size;
             m_framesWritten++;
         }
-        
+
         av_packet_free(&pkt);
     }
 
     void WriteAudio(WriteTask& task) {
+        if (!m_audioStream) return;
         if (task.timestamp < m_startTimestamp) return;
-        if (!m_audioStream) return;  // FIX: Extra safety check
 
         AVPacket* pkt = av_packet_alloc();
-        if (!pkt) {
-            spdlog::error("Failed to allocate audio packet");
-            return;
-        }
-        
+        if (!pkt) return;
+
         int ret = av_new_packet(pkt, (int)task.data.size());
         if (ret < 0) {
-            spdlog::error("Failed to allocate packet data");
             av_packet_free(&pkt);
             return;
         }
-        
-        memcpy(pkt->data, task.data.data(), task.data.size());
 
+        memcpy(pkt->data, task.data.data(), task.data.size());
         pkt->stream_index = m_audioStream->index;
-        int64_t pts_us = (int64_t)(task.timestamp - m_startTimestamp);
-        pkt->pts = pkt->dts = av_rescale_q(pts_us, { 1, 1000000 }, m_audioStream->time_base);
+
+        // FIX: Calculate audio PTS from recording start
+        int64_t elapsed_us = static_cast<int64_t>(task.timestamp - m_startTimestamp);
+        int64_t pts_samples = av_rescale_q(elapsed_us, { 1, 1000000 }, m_audioStream->time_base);
+
+        // Ensure monotonic
+        if (pts_samples <= m_lastAudioPts) {
+            pts_samples = m_lastAudioPts + 1;
+        }
+        m_lastAudioPts = pts_samples;
+
+        pkt->pts = pts_samples;
+        pkt->dts = pts_samples;
 
         int channels = m_audioStream->codecpar->ch_layout.nb_channels;
         int bitsPerSample = m_audioStream->codecpar->bits_per_coded_sample;
         int bytesPerSample = (bitsPerSample > 0) ? (bitsPerSample / 8) : 4;
-        
-        // FIX: Prevent division by zero
         int frameSize = channels * bytesPerSample;
         if (frameSize > 0) {
-            pkt->duration = (int)task.data.size() / frameSize;
+            pkt->duration = static_cast<int>(task.data.size()) / frameSize;
         }
 
         ret = av_interleaved_write_frame(m_formatContext, pkt);
-        if (ret < 0) {
-            // FIX: Don't spam logs
-            static std::atomic<uint64_t> audioWriteErrors{0};
-            audioWriteErrors++;
-            if (audioWriteErrors % 100 == 1) {
-                spdlog::warn("Audio write errors: {}", audioWriteErrors.load());
-            }
-        } else {
+        if (ret >= 0) {
             m_bytesWritten += pkt->size;
             m_audioPacketsWritten++;
         }
-        
+
         av_packet_free(&pkt);
     }
 
@@ -357,11 +428,19 @@ private:
     std::atomic<bool> m_running;
     std::thread m_writerThread;
     std::queue<WriteTask> m_taskQueue;
-    mutable std::mutex m_queueMutex;  // FIX: mutable for const methods
+    mutable std::mutex m_queueMutex;
     std::condition_variable m_taskAvailable;
     bool m_headerWritten;
+
     uint64_t m_startTimestamp;
+    uint64_t m_lastVideoTimestamp;  // Track last video for A/V sync on stop
+    int64_t m_lastVideoPts;
+    int64_t m_lastAudioPts;
+    uint32_t m_fps;
+    bool m_firstVideoReceived;
+    std::queue<WriteTask> m_pendingAudio;  // Buffer audio until first video keyframe
+
     std::atomic<uint64_t> m_bytesWritten;
-    std::atomic<uint64_t> m_framesWritten;      // FIX: Added stats
-    std::atomic<uint64_t> m_audioPacketsWritten; // FIX: Added stats
+    std::atomic<uint64_t> m_framesWritten;
+    std::atomic<uint64_t> m_audioPacketsWritten;
 };

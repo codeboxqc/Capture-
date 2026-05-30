@@ -12,15 +12,16 @@ struct CapturedFrame {
 
 class FrameCapture {
 public:
-    FrameCapture() 
+    FrameCapture()
         : m_running(false)
         , m_frameCount(0)          // FIX: Explicitly initialize
         , m_needsStaging(false)
         , m_targetFPS(60)
         , m_ringBufferSize(8)
         , m_droppedFrames(0)       // FIX: Track dropped frames
-    {}
-    
+    {
+    }
+
     ~FrameCapture() { StopCapture(); }
 
     bool Initialize(bool needsStaging, ComPtr<ID3D12Device> d3d12Device, const ExtendedGPUInfo& gpuInfo,
@@ -50,16 +51,31 @@ public:
         return true;
     }
 
+    // FIX: Public method to clear buffer (call before recording starts)
+    void ClearBuffer() {
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        while (!m_ringBuffer.empty()) {
+            auto& frame = m_ringBuffer.front();
+            // Return texture to pool before discarding
+            if (frame.texture) {
+                std::lock_guard<std::mutex> poolLock(m_texturePoolMutex);
+                m_texturePool.push(frame.texture);
+            }
+            m_ringBuffer.pop();
+        }
+        spdlog::info("FrameCapture buffer cleared");
+    }
+
     void StopCapture() {
         m_running = false;
-        
+
         // FIX: Wake up any waiting threads
         m_frameAvailable.notify_all();
-        
+
         if (m_captureThread.joinable()) {
             m_captureThread.join();
         }
-        
+
         // FIX: Clear buffers safely
         {
             std::lock_guard<std::mutex> lock(m_bufferMutex);
@@ -69,7 +85,7 @@ public:
             std::lock_guard<std::mutex> lock(m_texturePoolMutex);
             while (!m_texturePool.empty()) m_texturePool.pop();
         }
-        
+
         if (m_droppedFrames > 0) {
             spdlog::warn("Total frames dropped during capture: {}", m_droppedFrames.load());
         }
@@ -95,11 +111,15 @@ public:
         m_texturePool.push(texture);
     }
 
+    // === CURSOR CONTROL ===
+    void SetShowCursor(bool show) { m_showCursor = show; }
+    bool GetShowCursor() const { return m_showCursor; }
+
     uint64_t GetTimestamp() const {
         return std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::high_resolution_clock::now().time_since_epoch()).count();
     }
-    
+
     // FIX: Added stats getters
     uint64_t GetFrameCount() const { return m_frameCount.load(); }
     uint64_t GetDroppedFrames() const { return m_droppedFrames.load(); }
@@ -118,7 +138,7 @@ private:
         // --- HIGH PRECISION FRAMERATE LIMITER ---
         auto frameDuration = std::chrono::microseconds(1000000 / (m_targetFPS > 0 ? m_targetFPS : 60));
         auto nextFrameTime = std::chrono::steady_clock::now();
-        
+
         // FIX: Calculate keyframe interval (every 2 seconds)
         const uint32_t keyframeInterval = m_targetFPS * 2;
 
@@ -146,7 +166,7 @@ private:
                     spdlog::warn("Desktop duplication lost, attempting recovery...");
                     duplication.Reset();
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    
+
                     hr = InitializeDesktopDuplication(&duplication);
                     if (SUCCEEDED(hr)) {
                         spdlog::info("Desktop duplication recovered");
@@ -168,7 +188,7 @@ private:
                 sourceTexture->GetDesc(&srcDesc);
 
                 ComPtr<ID3D11Texture2D> destTexture = GetRingBufferTexture(srcDesc.Width, srcDesc.Height, srcDesc.Format);
-                
+
                 // FIX: Check texture allocation
                 if (!destTexture) {
                     spdlog::error("Failed to allocate ring buffer texture");
@@ -179,13 +199,23 @@ private:
                 // GPU memory copy
                 m_sharedD3D11Context->CopyResource(destTexture.Get(), sourceTexture.Get());
 
+                // NOTE: Cursor drawing moved to RecordingPipeline using Mouse.h
+
                 uint64_t currentFrameIndex = m_frameCount.fetch_add(1);  // FIX: Thread-safe increment
 
                 CapturedFrame frame;
                 frame.texture = destTexture;
-                frame.timestamp = GetTimestamp();
+
+                // FIX: Use CURRENT QPC timestamp, not DXGI LastPresentTime which can be 0/stale
+                // This matches USB capture and ensures consistent timing for both modes
+                LARGE_INTEGER qpcFreq, qpcNow;
+                QueryPerformanceFrequency(&qpcFreq);
+                QueryPerformanceCounter(&qpcNow);
+                frame.timestamp = (qpcNow.QuadPart * 1000000) / qpcFreq.QuadPart;
+
                 frame.frameIndex = static_cast<uint32_t>(currentFrameIndex);
-                frame.isKeyframe = (currentFrameIndex % keyframeInterval == 0);  // FIX: Set keyframe flag
+                // FIX: First frame MUST be keyframe, then every keyframeInterval after
+                frame.isKeyframe = (currentFrameIndex == 0) || (currentFrameIndex % keyframeInterval == 0);
                 frame.hdrMetadata = false;  // FIX: Initialize to false
 
                 // FIX: DEADLOCK FIX - Don't call ReturnTexture while holding m_bufferMutex
@@ -199,27 +229,27 @@ private:
                     }
                     m_ringBuffer.push(frame);
                 }
-                
+
                 // Return texture OUTSIDE the lock
                 if (textureToReturn) {
                     ReturnTexture(textureToReturn);
                 }
-                
+
                 m_frameAvailable.notify_one();
             }
-            
+
             duplication->ReleaseFrame();
         }
-        
+
         // FIX: Removed duplicate ReleaseFrame call (was causing potential crash)
-        spdlog::info("Frame capture thread stopped. Captured: {}, Dropped: {}", 
+        spdlog::info("Frame capture thread stopped. Captured: {}, Dropped: {}",
             m_frameCount.load(), m_droppedFrames.load());
     }
 
     HRESULT InitializeDesktopDuplication(IDXGIOutputDuplication** duplication) {
         if (!m_targetOutput) return E_INVALIDARG;
         if (!duplication) return E_POINTER;  // FIX: Null check
-        
+
         ComPtr<IDXGIOutput1> output1;
         HRESULT hr = m_targetOutput.As(&output1);
         if (FAILED(hr)) return hr;
@@ -263,7 +293,7 @@ private:
         std::lock_guard<std::mutex> lock(m_texturePoolMutex);
         if (!m_texturePool.empty()) {
             auto texture = m_texturePool.front();
-            
+
             // FIX: Null check before use
             if (texture) {
                 D3D11_TEXTURE2D_DESC desc;
@@ -274,7 +304,7 @@ private:
                     return texture;
                 }
             }
-            
+
             // Size changed, clear pool
             while (!m_texturePool.empty()) m_texturePool.pop();
         }
@@ -299,6 +329,9 @@ private:
     std::queue<ComPtr<ID3D11Texture2D>> m_texturePool;
     std::mutex m_texturePoolMutex;
 
-    std::atomic<uint64_t> m_frameCount;      // FIX: Made atomic
-    std::atomic<uint64_t> m_droppedFrames;   // FIX: Track dropped frames
+    std::atomic<uint64_t> m_frameCount;
+    std::atomic<uint64_t> m_droppedFrames;
+
+    // Cursor settings (actual drawing done by MouseCapture in RecordingPipeline)
+    bool m_showCursor = true;
 };
