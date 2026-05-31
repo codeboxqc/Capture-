@@ -912,6 +912,33 @@ private:
                     ImGui::Separator();
                     ImGui::Spacing();
 
+                    // Camera Options
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("CAMERA STREAM (IP / URL)");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
+                    static char cameraUrl[256] = "";
+                    static bool initCameraUrl = true;
+                    if (initCameraUrl) {
+                        strncpy_s(cameraUrl, g_settings.cameraUrl.c_str(), sizeof(cameraUrl) - 1);
+                        initCameraUrl = false;
+                    }
+
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                    if (ImGui::InputTextWithHint("##CameraUrl", "rtsp://admin:12345@192.168.1.100:554/stream", cameraUrl, IM_ARRAYSIZE(cameraUrl))) {
+                        g_settings.cameraUrl = cameraUrl;
+                    }
+                    
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+                    ImGui::TextWrapped("If URL is provided, it overrides USB/Display capture modes.");
+                    ImGui::PopStyleColor();
+
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
                     // USB Device Selection
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
                     ImGui::Text("USB CAPTURE DEVICES");

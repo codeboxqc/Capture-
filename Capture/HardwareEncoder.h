@@ -261,7 +261,7 @@ public:
         avFrame->pts = frame.timestamp;
 
         // FIX: Properly request keyframe (pict_type only - key_frame removed in newer FFmpeg)
-        if (frame.isKeyframe || (m_frameCount % m_keyframeInterval == 0)) {
+        if (frame.isKeyframe || (m_frameCount > 0 && m_keyframeInterval > 0 && m_frameCount % m_keyframeInterval == 0)) {
             avFrame->pict_type = AV_PICTURE_TYPE_I;
         }
         else {
@@ -607,8 +607,10 @@ private:
         }
         else if (encoderType == EncoderType::SOFTWARE) {
             // libx264/libx265 presets
-            ret |= av_opt_set(m_codecContext->priv_data, "preset", "veryslow", 0);
-            ret |= av_opt_set(m_codecContext->priv_data, "crf", std::to_string(targetQuality).c_str(), 0);
+            // Defaulting to superfast to allow ANY cpu to record properly without stutter
+            ret |= av_opt_set(m_codecContext->priv_data, "preset", "superfast", 0);
+            int crf = targetQuality == 0 ? 15 : targetQuality; // If lossless requested, default to very high quality CRF 15
+            ret |= av_opt_set(m_codecContext->priv_data, "crf", std::to_string(crf).c_str(), 0);
         }
 
         return (ret >= 0);  // Some options may not exist, that's OK

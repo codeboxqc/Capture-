@@ -123,6 +123,12 @@ struct RecordingSettings {
     uint32_t displayIndex = 0;
     int32_t usbDeviceIndex = -1;
 
+    // --- CAMERA OPTIONS ---
+    std::string cameraUrl = "";
+    int cameraPort = 0;
+    std::string cameraUsername = "";
+    std::string cameraPassword = "";
+
     // --- NEW: Quality Preset ---
     // 0 = Lossless (QP 0), 1 = High (QP 5), 2 = Medium (QP 15), 3 = Low (QP 25)
     uint32_t qualityPreset = 0;

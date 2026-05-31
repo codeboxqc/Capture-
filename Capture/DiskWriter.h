@@ -265,15 +265,7 @@ public:
     void QueueWriteTask(WriteTask&& task) {
         std::lock_guard<std::mutex> lock(m_queueMutex);
 
-        if (m_taskQueue.size() > 1000) {
-            static uint64_t lastWarnTime = 0;
-            uint64_t now = std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (now - lastWarnTime > 5) {
-                spdlog::warn("Write queue backing up: {} tasks pending", m_taskQueue.size());
-                lastWarnTime = now;
-            }
-        }
+        // No arbitrary warning limit - handle max RAM size buffer efficiently
 
         m_taskQueue.push(std::move(task));
         m_taskAvailable.notify_one();

@@ -139,8 +139,8 @@ private:
         auto frameDuration = std::chrono::microseconds(1000000 / (m_targetFPS > 0 ? m_targetFPS : 60));
         auto nextFrameTime = std::chrono::steady_clock::now();
 
-        // FIX: Calculate keyframe interval (every 2 seconds)
-        const uint32_t keyframeInterval = m_targetFPS * 2;
+        // Calculate keyframe interval (every 1 second to match encoder GOP)
+        const uint32_t keyframeInterval = m_targetFPS > 0 ? m_targetFPS : 60;
 
         while (m_running) {
             auto now = std::chrono::steady_clock::now();
