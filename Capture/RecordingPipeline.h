@@ -4,6 +4,7 @@
 #include "VirtualDisplayManager.h"
 #include "FrameCapture.h"
 #include "usbcapture.h"
+#include "camera.h"
 #include "USBAudioCapture.h"
 #include "AudioCapture.h"
 #include "HardwareEncoder.h"
@@ -49,6 +50,7 @@ public:
 
         m_frameCapture.reset();
         m_usbCapture.reset();
+        m_cameraCapture.reset();
         m_usbAudioCapture.reset();
         m_audioCapture.reset();
         m_encoder.reset();
@@ -71,8 +73,13 @@ public:
         m_droppedFrames = 0;
 
         m_isUSBCapture = (settings.usbDeviceIndex >= 0);
+        m_isCameraCapture = (!settings.cameraUrl.empty());
 
-        if (m_isUSBCapture) {
+        if (m_isCameraCapture) {
+            spdlog::info("=== CAMERA CAPTURE MODE SELECTED ===");
+            return StartCameraRecording(settings);
+        }
+        else if (m_isUSBCapture) {
             spdlog::info("=== USB CAPTURE MODE SELECTED ===");
             return StartUSBRecording(settings);
         }
@@ -113,6 +120,7 @@ public:
         spdlog::info("Stopping video captures...");
         if (m_frameCapture) m_frameCapture->StopCapture();
         if (m_usbCapture) m_usbCapture->Stop();
+        if (m_cameraCapture) m_cameraCapture->Stop();
 
         // Flush Encoder to ensure final frames are saved
         spdlog::info("Flushing encoder...");
@@ -197,12 +205,26 @@ private:
     bool CaptureSingleFrame(const std::string& outputPath) {
         spdlog::info("Performing single-frame capture (not recording)");
 
+        // FIX: Ensure detector and display manager are initialized if this is called early
+        if (!m_gpuDetector) {
+            m_gpuDetector = std::make_unique<GPUDetector>();
+        }
+        if (!m_displayManager) {
+            m_displayManager = std::make_unique<VirtualDisplayManager>();
+            m_displayManager->Initialize();
+        }
+
         try {
             m_gpuInfo = m_gpuDetector->GetGPUByIndex(m_settings.gpuIndex);
         }
         catch (...) {
-            spdlog::error("Screenshot: Failed to get GPU info");
-            return false;
+            spdlog::error("Screenshot: Failed to get GPU info by index {}, trying optimal", m_settings.gpuIndex);
+            try {
+                m_gpuInfo = m_gpuDetector->GetOptimalGPU();
+            } catch (...) {
+                spdlog::error("Screenshot: Failed to get optimal GPU");
+                return false;
+            }
         }
 
         m_displayManager->SetActiveDisplay(m_settings.displayIndex);
@@ -534,6 +556,61 @@ private:
         av_frame_free(&frame);
         avcodec_free_context(&c);
     }
+    bool StartCameraRecording(const RecordingSettings& settings) {
+        try {
+            m_gpuInfo = m_gpuDetector->GetGPUByIndex(settings.gpuIndex);
+        } catch (...) { return false; }
+
+        ComPtr<IDXGIFactory1> factory;
+        CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+        ComPtr<IDXGIAdapter1> encodeAdapter;
+        for (UINT i = 0; factory->EnumAdapters1(i, &encodeAdapter) != DXGI_ERROR_NOT_FOUND; i++) {
+            DXGI_ADAPTER_DESC1 desc; encodeAdapter->GetDesc1(&desc);
+            if (desc.AdapterLuid.LowPart == m_gpuInfo.adapterLuid.LowPart &&
+                desc.AdapterLuid.HighPart == m_gpuInfo.adapterLuid.HighPart) break;
+        }
+        if (!encodeAdapter) return false;
+
+        HRESULT hr = D3D11CreateDevice(encodeAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+            &m_sharedD3D11Device, nullptr, &m_sharedD3D11Context);
+        if (FAILED(hr)) return false;
+
+        m_cameraCapture = std::make_unique<CameraCapture>();
+        std::string url = settings.cameraUrl;
+        if (!m_cameraCapture->Initialize(url, m_sharedD3D11Device)) {
+            CleanupOnFailure(); return false;
+        }
+
+        m_captureD3D11Device = m_sharedD3D11Device;
+        m_captureD3D11Context = m_sharedD3D11Context;
+
+        m_settings.width = 1920; // Default or parsed from stream
+        m_settings.height = 1080;
+
+        m_encoder = std::make_unique<HardwareEncoder>();
+        if (!m_encoder->Initialize(m_gpuInfo, m_settings, m_sharedD3D11Device, m_sharedD3D11Context)) {
+            CleanupOnFailure(); return false;
+        }
+
+        m_diskWriter = std::make_unique<DiskWriter>();
+        if (!m_diskWriter->Initialize(m_settings, m_encoder->GetExtradata(), m_encoder->GetSoftwarePixelFormat())) {
+            CleanupOnFailure(); return false;
+        }
+
+        if (!m_diskWriter->StartWriter()) { CleanupOnFailure(); return false; }
+
+        m_recording = true;
+        m_processThread = std::thread(&RecordingPipeline::ProcessLoop, this);
+        m_syncThread = std::thread(&RecordingPipeline::SyncLoop, this);
+
+        if (!m_cameraCapture->Start()) { CleanupOnFailure(); return false; }
+
+        spdlog::info("Camera Recording started successfully");
+        if (m_statusCallback) m_statusCallback("Camera Recording started");
+        return true;
+    }
+
     bool StartUSBRecording(const RecordingSettings& settings) {
         try {
             m_gpuInfo = m_gpuDetector->GetGPUByIndex(settings.gpuIndex);
@@ -899,6 +976,8 @@ private:
         m_recording = false;
         if (m_frameCapture) m_frameCapture->StopCapture();
         if (m_usbCapture) m_usbCapture->Stop();
+        if (m_cameraCapture) m_cameraCapture->Stop();
+        if (m_cameraCapture) m_cameraCapture->Stop();
         if (m_usbAudioCapture) m_usbAudioCapture->Stop();
         if (m_audioCapture) m_audioCapture->StopCapture();
         if (m_diskWriter) m_diskWriter->StopWriter();
@@ -955,8 +1034,19 @@ private:
 
         while (m_recording) {
             bool gotFrame = false;
+            CameraFrame camFrame;
 
-            if (m_isUSBCapture) {
+            if (m_isCameraCapture) {
+                if (!m_cameraCapture) break;
+                gotFrame = m_cameraCapture->GetNextFrame(camFrame, 50);
+                if (gotFrame && camFrame.texture) {
+                    frame.texture = camFrame.texture;
+                    frame.timestamp = camFrame.timestamp;
+                    frame.frameIndex = m_droppedFrames; // Simplified index
+                    frame.isKeyframe = (frame.frameIndex % (m_settings.fps > 0 ? m_settings.fps : 60) == 0);
+                }
+            }
+            else if (m_isUSBCapture) {
                 if (!m_usbCapture) break;
 
                 gotFrame = m_usbCapture->GetFrame(usbFrame, 50);
@@ -1198,6 +1288,7 @@ private:
     std::unique_ptr<VirtualDisplayManager> m_displayManager;
     std::unique_ptr<FrameCapture> m_frameCapture;
     std::unique_ptr<SimpleUSBCapture> m_usbCapture;
+    std::unique_ptr<CameraCapture> m_cameraCapture;
     std::unique_ptr<USBAudioCapture> m_usbAudioCapture;
     std::unique_ptr<AudioCapture> m_audioCapture;
     std::unique_ptr<HardwareEncoder> m_encoder;
@@ -1220,6 +1311,7 @@ private:
     std::atomic<uint32_t> m_droppedFrames;
     bool m_isSameAdapter;
     bool m_isUSBCapture;
+    bool m_isCameraCapture = false;
 
     // FIX: A/V sync - shared recording clock
     std::atomic<uint64_t> m_recordingStartTime;   // When recording started (common reference)

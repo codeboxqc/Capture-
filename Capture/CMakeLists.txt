@@ -73,6 +73,7 @@ include_directories(
 # Add executable
 add_executable(RecordingEngine WIN32
     main.cpp
+    camera.cpp
 )
 
 # Link libraries

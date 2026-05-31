@@ -132,6 +132,10 @@ public:
         if (m_useSystemMemory) {
             m_codecContext->pix_fmt = AV_PIX_FMT_YUV420P; // Better compatibility than 444 for software
             m_codecContext->sw_pix_fmt = AV_PIX_FMT_YUV420P;
+            // Use ultrafast for software encode fallback to ensure ANY CPU can handle it
+            if (gpuInfo.encoderType == EncoderType::SOFTWARE) {
+                av_opt_set(m_codecContext->priv_data, "preset", "ultrafast", 0);
+            }
             if (!InitializeSystemMemoryContext(settings, gpuInfo)) {
                 spdlog::error("Failed to initialize system memory context");
                 Cleanup();
@@ -607,8 +611,10 @@ private:
         }
         else if (encoderType == EncoderType::SOFTWARE) {
             // libx264/libx265 presets
-            ret |= av_opt_set(m_codecContext->priv_data, "preset", "veryslow", 0);
-            ret |= av_opt_set(m_codecContext->priv_data, "crf", std::to_string(targetQuality).c_str(), 0);
+            // Defaulting to superfast to allow ANY cpu to record properly without stutter
+            ret |= av_opt_set(m_codecContext->priv_data, "preset", "superfast", 0);
+            int crf = targetQuality == 0 ? 15 : targetQuality; // If lossless requested, default to very high quality CRF 15
+            ret |= av_opt_set(m_codecContext->priv_data, "crf", std::to_string(crf).c_str(), 0);
         }
 
         return (ret >= 0);  // Some options may not exist, that's OK
