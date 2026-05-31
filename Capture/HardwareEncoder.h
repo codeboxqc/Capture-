@@ -8,7 +8,7 @@ extern "C" {
 }
 
 struct EncodedPacket {
-    std::vector<uint8_t> data;
+    std::shared_ptr<AVPacket> pkt;
     int64_t pts;
     bool keyframe;
 };
@@ -298,9 +298,16 @@ public:
             }
 
             EncodedPacket ep;
-            ep.data.assign(m_packet->data, m_packet->data + m_packet->size);
-            ep.pts = m_packet->pts;
-            ep.keyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
+            AVPacket* new_pkt = av_packet_alloc();
+            if (new_pkt) {
+                av_packet_move_ref(new_pkt, m_packet);
+                ep.pkt = std::shared_ptr<AVPacket>(new_pkt, [](AVPacket* p) { av_packet_free(&p); });
+                ep.pts = new_pkt->pts;
+                ep.keyframe = (new_pkt->flags & AV_PKT_FLAG_KEY) != 0;
+            } else {
+                spdlog::error("Failed to allocate packet for zero-copy");
+                return false;
+            }
 
             // Capture extradata if newly available from the encoder
             if (m_codecContext->extradata_size > 0 && m_codecContext->extradata) {
@@ -332,9 +339,16 @@ public:
             }
 
             EncodedPacket ep;
-            ep.data.assign(m_packet->data, m_packet->data + m_packet->size);
-            ep.pts = m_packet->pts;
-            ep.keyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
+            AVPacket* new_pkt = av_packet_alloc();
+            if (new_pkt) {
+                av_packet_move_ref(new_pkt, m_packet);
+                ep.pkt = std::shared_ptr<AVPacket>(new_pkt, [](AVPacket* p) { av_packet_free(&p); });
+                ep.pts = new_pkt->pts;
+                ep.keyframe = (new_pkt->flags & AV_PKT_FLAG_KEY) != 0;
+            } else {
+                spdlog::error("Failed to allocate packet for zero-copy during flush");
+                break;
+            }
 
             outPackets.push_back(std::move(ep));
             m_encodedFrames++;

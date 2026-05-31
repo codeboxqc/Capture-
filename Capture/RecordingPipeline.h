@@ -121,7 +121,7 @@ public:
             m_encoder->Flush(finalPackets);
             for (auto& packet : finalPackets) {
                 WriteTask task;
-                task.data = std::move(packet.data);
+                task.pkt = std::move(packet.pkt);
                 task.timestamp = static_cast<uint64_t>(packet.pts);
                 task.isVideo = true;
                 task.pts = packet.pts;
@@ -1145,7 +1145,7 @@ private:
 
                 for (auto& packet : encodedPackets) {
                     WriteTask task;
-                    task.data = std::move(packet.data);
+                    task.pkt = std::move(packet.pkt);
                     // Use packet PTS as the task timestamp. 
                     // This is the original QPC timestamp of the frame.
                     task.timestamp = static_cast<uint64_t>(packet.pts);

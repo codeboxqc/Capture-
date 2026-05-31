@@ -15,6 +15,7 @@ extern "C" {
 
 struct WriteTask {
     std::vector<uint8_t> data;
+    std::shared_ptr<AVPacket> pkt;
     uint64_t timestamp;
     bool isVideo;
     int64_t pts;
@@ -333,19 +334,28 @@ private:
     void WriteVideo(WriteTask& task) {
         if (task.timestamp < m_startTimestamp) return;
 
-        AVPacket* pkt = av_packet_alloc();
-        if (!pkt) {
-            spdlog::error("Failed to allocate video packet");
-            return;
+        AVPacket* pkt = nullptr;
+        bool using_zero_copy = false;
+
+        if (task.pkt) {
+            pkt = task.pkt.get();
+            using_zero_copy = true;
+        } else {
+            pkt = av_packet_alloc();
+            if (!pkt) {
+                spdlog::error("Failed to allocate video packet");
+                return;
+            }
+
+            int ret = av_new_packet(pkt, (int)task.data.size());
+            if (ret < 0) {
+                av_packet_free(&pkt);
+                return;
+            }
+
+            memcpy(pkt->data, task.data.data(), task.data.size());
         }
 
-        int ret = av_new_packet(pkt, (int)task.data.size());
-        if (ret < 0) {
-            av_packet_free(&pkt);
-            return;
-        }
-
-        memcpy(pkt->data, task.data.data(), task.data.size());
         pkt->stream_index = m_videoStream->index;
 
         // FIX: Calculate PTS in milliseconds from recording start
@@ -366,13 +376,15 @@ private:
 
         if (task.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
 
-        ret = av_interleaved_write_frame(m_formatContext, pkt);
+        int ret = av_interleaved_write_frame(m_formatContext, pkt);
         if (ret >= 0) {
             m_bytesWritten += pkt->size;
             m_framesWritten++;
         }
 
-        av_packet_free(&pkt);
+        if (!using_zero_copy) {
+            av_packet_free(&pkt);
+        }
     }
 
     void WriteAudio(WriteTask& task) {
