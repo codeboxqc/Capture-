@@ -10,7 +10,8 @@
 #include "HardwareEncoder.h"
 #include "DiskWriter.h"
 #include "Mouse.h"
-#include <d3d11_4.h> 
+#include <d3d11_4.h>
+#include <d3d10.h>
 #include <fstream>
 #include <filesystem>
 #include <thread>
@@ -653,8 +654,8 @@ private:
             return false;
         }
 
-        ComPtr<ID3D11Multithread> multiThread;
-        if (SUCCEEDED(m_sharedD3D11Context.As(&multiThread))) {
+        ComPtr<ID3D10Multithread> multiThread;
+        if (SUCCEEDED(m_sharedD3D11Device.As(&multiThread))) {
             multiThread->SetMultithreadProtected(TRUE);
         }
 
@@ -840,8 +841,8 @@ private:
 
         if (FAILED(hr)) return false;
 
-        ComPtr<ID3D11Multithread> multiThread;
-        if (SUCCEEDED(m_sharedD3D11Context.As(&multiThread))) {
+        ComPtr<ID3D10Multithread> multiThread;
+        if (SUCCEEDED(m_sharedD3D11Device.As(&multiThread))) {
             multiThread->SetMultithreadProtected(TRUE);
         }
 
@@ -860,8 +861,8 @@ private:
             hr = D3D11CreateDevice(displayAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &m_captureD3D11Device, nullptr, &m_captureD3D11Context);
             if (FAILED(hr)) return false;
 
-            ComPtr<ID3D11Multithread> capMultiThread;
-            if (SUCCEEDED(m_captureD3D11Context.As(&capMultiThread))) {
+            ComPtr<ID3D10Multithread> capMultiThread;
+            if (SUCCEEDED(m_captureD3D11Device.As(&capMultiThread))) {
                 capMultiThread->SetMultithreadProtected(TRUE);
             }
         }

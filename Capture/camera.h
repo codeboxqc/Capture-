@@ -3,6 +3,8 @@
 #include <vector>
 #include <memory>
 #include <d3d11.h>
+#include <d3d10.h>
+#include <d3d11_4.h>
 #include <wrl/client.h>
 #include <thread>
 #include <atomic>

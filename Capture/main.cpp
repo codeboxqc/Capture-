@@ -919,6 +919,12 @@ private:
                     ImGui::Spacing();
 
                     static char cameraUrl[256] = "";
+                    static bool initCameraUrl = true;
+                    if (initCameraUrl) {
+                        strncpy_s(cameraUrl, g_settings.cameraUrl.c_str(), sizeof(cameraUrl) - 1);
+                        initCameraUrl = false;
+                    }
+
                     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
                     if (ImGui::InputTextWithHint("##CameraUrl", "rtsp://admin:12345@192.168.1.100:554/stream", cameraUrl, IM_ARRAYSIZE(cameraUrl))) {
                         g_settings.cameraUrl = cameraUrl;

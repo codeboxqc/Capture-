@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(RecordingEngine)
+project(Capture)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -71,13 +71,13 @@ include_directories(
 )
 
 # Add executable
-add_executable(RecordingEngine WIN32
+add_executable(Capture WIN32
     main.cpp
     camera.cpp
 )
 
 # Link libraries
-target_link_libraries(RecordingEngine PRIVATE
+target_link_libraries(Capture PRIVATE
     ${FFMPEG_avcodec_LIBRARY}
     ${FFMPEG_avformat_LIBRARY}
     ${FFMPEG_avutil_LIBRARY}
@@ -98,7 +98,7 @@ target_link_libraries(RecordingEngine PRIVATE
 )
 
 # Copy DLLs
-add_custom_command(TARGET RecordingEngine POST_BUILD
+add_custom_command(TARGET Capture POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${VCPKG_INSTALLED_PATH}/bin/avcodec-*.dll
         ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/

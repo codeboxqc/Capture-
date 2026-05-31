@@ -190,9 +190,9 @@ void CameraCapture::CaptureLoop() {
 
                         auto d3dTexture = GetTextureFromPool(m_codecCtx->width, m_codecCtx->height);
                         if (d3dTexture && m_context) {
-                            // Protect multithreaded immediate context access
-                            ComPtr<ID3D11Multithread> multiThread;
-                            if (SUCCEEDED(m_context.As(&multiThread))) {
+                            // Protect multithreaded immediate context access using standard ID3D10Multithread interface which is universally available
+                            Microsoft::WRL::ComPtr<ID3D10Multithread> multiThread;
+                            if (SUCCEEDED(m_device.As(&multiThread))) {
                                 multiThread->Enter();
                                 m_context->UpdateSubresource(d3dTexture.Get(), 0, nullptr,
                                                              rgbFrame->data[0], rgbFrame->linesize[0], 0);

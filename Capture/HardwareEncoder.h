@@ -132,10 +132,6 @@ public:
         if (m_useSystemMemory) {
             m_codecContext->pix_fmt = AV_PIX_FMT_YUV420P; // Better compatibility than 444 for software
             m_codecContext->sw_pix_fmt = AV_PIX_FMT_YUV420P;
-            // Use ultrafast for software encode fallback to ensure ANY CPU can handle it
-            if (gpuInfo.encoderType == EncoderType::SOFTWARE) {
-                av_opt_set(m_codecContext->priv_data, "preset", "ultrafast", 0);
-            }
             if (!InitializeSystemMemoryContext(settings, gpuInfo)) {
                 spdlog::error("Failed to initialize system memory context");
                 Cleanup();
