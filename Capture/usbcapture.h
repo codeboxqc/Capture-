@@ -557,7 +557,7 @@ private:
                 frame.timestamp = (qpcNow.QuadPart * 1000000) / qpcFreq.QuadPart;
 
                 frame.frameIndex = static_cast<uint32_t>(m_frameCount++);
-                frame.isKeyframe = (frame.frameIndex % (m_fps * 2) == 0);
+                frame.isKeyframe = (frame.frameIndex % (m_fps > 0 ? m_fps : 60) == 0);
 
                 // DEADLOCK FIX - save texture to return OUTSIDE the lock
                 ComPtr<ID3D11Texture2D> textureToReturn = nullptr;

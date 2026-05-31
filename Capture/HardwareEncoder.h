@@ -261,7 +261,7 @@ public:
         avFrame->pts = frame.timestamp;
 
         // FIX: Properly request keyframe (pict_type only - key_frame removed in newer FFmpeg)
-        if (frame.isKeyframe || (m_frameCount % m_keyframeInterval == 0)) {
+        if (frame.isKeyframe || (m_frameCount > 0 && m_keyframeInterval > 0 && m_frameCount % m_keyframeInterval == 0)) {
             avFrame->pict_type = AV_PICTURE_TYPE_I;
         }
         else {

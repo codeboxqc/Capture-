@@ -668,7 +668,7 @@ private:
 
         if (settings.ramBufferSize > 0 && frameSize > 0) {
             uint64_t framesFromRam = settings.ramBufferSize / frameSize;
-            ringBufferSize = static_cast<uint32_t>(std::min(framesFromRam, static_cast<uint64_t>(512)));
+            ringBufferSize = static_cast<uint32_t>(framesFromRam);
             ringBufferSize = std::max(ringBufferSize, 32u);
 
             spdlog::info("USB RAM Buffer: {:.1f} GB = {} frames",
@@ -777,21 +777,8 @@ private:
             spdlog::warn("PERFORMANCE WARNING: Cross-adapter copy is slow for high resolutions!");
             spdlog::warn("For best performance, connect this monitor to the NVIDIA GPU.");
 
-            // FIX: Limit FPS for cross-adapter to prevent buffer overflow
-            // 4K cross-adapter maxes out at ~15-20 FPS through CPU
-            uint32_t maxCrossAdapterFps = 30;
-            if (m_settings.width >= 3840) {
-                maxCrossAdapterFps = 20;  // 4K limit
-            }
-            else if (m_settings.width >= 2560) {
-                maxCrossAdapterFps = 30;  // 1440p limit
-            }
-
-            if (m_settings.fps > maxCrossAdapterFps) {
-                spdlog::warn("Limiting FPS from {} to {} for cross-adapter capture",
-                    m_settings.fps, maxCrossAdapterFps);
-                m_settings.fps = maxCrossAdapterFps;
-            }
+            // Allow maximum FPS for cross-adapter capture
+            spdlog::info("Cross-adapter capture: Allowing full requested FPS ({})", m_settings.fps);
 
             hr = D3D11CreateDevice(displayAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &m_captureD3D11Device, nullptr, &m_captureD3D11Context);
             if (FAILED(hr)) return false;
@@ -883,7 +870,7 @@ private:
         if (settings.ramBufferSize > 0 && frameSize > 0) {
             // Calculate how many frames fit in the RAM buffer
             uint64_t framesFromRam = settings.ramBufferSize / frameSize;
-            ringBufferSize = static_cast<uint32_t>(std::min(framesFromRam, static_cast<uint64_t>(512)));  // Cap at 512 frames
+            ringBufferSize = static_cast<uint32_t>(framesFromRam);  // Cap at 512 frames
             ringBufferSize = std::max(ringBufferSize, 32u);  // Minimum 32 frames
 
             spdlog::info("RAM Buffer: {:.1f} GB = {} frames ({} x {} @ 4 bytes/pixel)",
@@ -985,7 +972,7 @@ private:
 
                 gotFrame = m_frameCapture->GetNextFrame(frame, 50);
                 if (gotFrame) {
-                    frame.isKeyframe = (frame.frameIndex % 60 == 0);
+                    frame.isKeyframe = (frame.frameIndex % (m_settings.fps > 0 ? m_settings.fps : 60) == 0);
                 }
             }
 
@@ -1080,13 +1067,7 @@ private:
             // Cross-adapter texture copy if needed
             ComPtr<ID3D11Texture2D> originalTexture = frame.texture;
             if (!m_isSameAdapter && !m_isUSBCapture) {
-                // FIX: Skip frames if we're falling behind to prevent audio desync
-                // Check how many frames are queued
-                size_t queuedFrames = 0;
-                if (m_frameCapture) {
-                    // If ring buffer is more than 50% full, skip non-keyframes
-                    // This prevents the pipeline from falling too far behind
-                }
+                // Allow all frames to be processed to maximize video quality
 
                 // Ensure we have a staging texture on the capture device
                 if (!m_captureStagingTexture) {
