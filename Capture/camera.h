@@ -35,6 +35,9 @@ public:
 
     // Connects to an IP camera stream or local directshow device
     bool Initialize(const std::string& url, Microsoft::WRL::ComPtr<ID3D11Device> device);
+    int GetWidth() const { return m_streamWidth; }
+    int GetHeight() const { return m_streamHeight; }
+    void ReturnTexture(Microsoft::WRL::ComPtr<ID3D11Texture2D> tex);
     bool Start();
     void Stop();
     bool GetNextFrame(CameraFrame& outFrame, int timeoutMs = 100);
@@ -42,6 +45,10 @@ public:
 private:
     void CaptureLoop();
     Microsoft::WRL::ComPtr<ID3D11Texture2D> CreateStagingTexture(int width, int height);
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> GetTextureFromPool(int width, int height);
+
+    std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> m_texturePool;
+    std::mutex m_poolMutex;
 
     std::string m_url;
     std::atomic<bool> m_running;
@@ -51,6 +58,9 @@ private:
     AVCodecContext* m_codecCtx = nullptr;
     SwsContext* m_swsCtx = nullptr;
     int m_videoStreamIndex = -1;
+
+    int m_streamWidth = 0;
+    int m_streamHeight = 0;
 
     Microsoft::WRL::ComPtr<ID3D11Device> m_device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_context;

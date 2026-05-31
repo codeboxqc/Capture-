@@ -585,8 +585,8 @@ private:
         m_captureD3D11Device = m_sharedD3D11Device;
         m_captureD3D11Context = m_sharedD3D11Context;
 
-        m_settings.width = 1920; // Default or parsed from stream
-        m_settings.height = 1080;
+        m_settings.width = m_cameraCapture->GetWidth();
+        m_settings.height = m_cameraCapture->GetHeight();
 
         m_encoder = std::make_unique<HardwareEncoder>();
         if (!m_encoder->Initialize(m_gpuInfo, m_settings, m_sharedD3D11Device, m_sharedD3D11Context)) {
@@ -977,7 +977,6 @@ private:
         if (m_frameCapture) m_frameCapture->StopCapture();
         if (m_usbCapture) m_usbCapture->Stop();
         if (m_cameraCapture) m_cameraCapture->Stop();
-        if (m_cameraCapture) m_cameraCapture->Stop();
         if (m_usbAudioCapture) m_usbAudioCapture->Stop();
         if (m_audioCapture) m_audioCapture->StopCapture();
         if (m_diskWriter) m_diskWriter->StopWriter();
@@ -1042,7 +1041,7 @@ private:
                 if (gotFrame && camFrame.texture) {
                     frame.texture = camFrame.texture;
                     frame.timestamp = camFrame.timestamp;
-                    frame.frameIndex = m_droppedFrames; // Simplified index
+                    frame.frameIndex = static_cast<uint32_t>(m_cameraFrameCount.fetch_add(1));
                     frame.isKeyframe = (frame.frameIndex % (m_settings.fps > 0 ? m_settings.fps : 60) == 0);
                 }
             }
@@ -1236,6 +1235,9 @@ private:
             if (m_isUSBCapture && m_usbCapture) {
                 m_usbCapture->ReturnTexture(usbFrame.texture);
             }
+            else if (m_isCameraCapture && m_cameraCapture) {
+                m_cameraCapture->ReturnTexture(frame.texture);
+            }
             else if (m_frameCapture) {
                 m_frameCapture->ReturnTexture(originalTexture);
             }
@@ -1309,6 +1311,7 @@ private:
 
     std::atomic<bool> m_recording;
     std::atomic<uint32_t> m_droppedFrames;
+    std::atomic<uint64_t> m_cameraFrameCount{0};
     bool m_isSameAdapter;
     bool m_isUSBCapture;
     bool m_isCameraCapture = false;

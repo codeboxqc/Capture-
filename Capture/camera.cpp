@@ -80,6 +80,8 @@ bool CameraCapture::Initialize(const std::string& url, Microsoft::WRL::ComPtr<ID
 
     const AVCodec* codec = avcodec_find_decoder(m_formatCtx->streams[m_videoStreamIndex]->codecpar->codec_id);
     m_codecCtx = avcodec_alloc_context3(codec);
+    m_streamWidth = m_formatCtx->streams[m_videoStreamIndex]->codecpar->width;
+    m_streamHeight = m_formatCtx->streams[m_videoStreamIndex]->codecpar->height;
     avcodec_parameters_to_context(m_codecCtx, m_formatCtx->streams[m_videoStreamIndex]->codecpar);
 
     // Optimization for latency
@@ -120,11 +122,13 @@ void CameraCapture::Stop() {
 bool CameraCapture::GetNextFrame(CameraFrame& outFrame, int timeoutMs) {
     auto startTime = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - startTime < std::chrono::milliseconds(timeoutMs)) {
-        std::lock_guard<std::mutex> lock(m_frameMutex);
-        if (m_hasNewFrame && m_latestFrame.texture) {
-            outFrame = m_latestFrame;
-            m_hasNewFrame = false;
-            return true;
+        {
+            std::lock_guard<std::mutex> lock(m_frameMutex);
+            if (m_hasNewFrame && m_latestFrame.texture) {
+                outFrame = m_latestFrame;
+                m_hasNewFrame = false;
+                return true;
+            }
         }
         if (!m_running) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -149,6 +153,22 @@ Microsoft::WRL::ComPtr<ID3D11Texture2D> CameraCapture::CreateStagingTexture(int 
     return tex;
 }
 
+Microsoft::WRL::ComPtr<ID3D11Texture2D> CameraCapture::GetTextureFromPool(int width, int height) {
+    std::lock_guard<std::mutex> lock(m_poolMutex);
+    if (!m_texturePool.empty()) {
+        auto tex = m_texturePool.back();
+        m_texturePool.pop_back();
+        return tex;
+    }
+    return CreateStagingTexture(width, height);
+}
+
+void CameraCapture::ReturnTexture(Microsoft::WRL::ComPtr<ID3D11Texture2D> tex) {
+    if (!tex) return;
+    std::lock_guard<std::mutex> lock(m_poolMutex);
+    m_texturePool.push_back(tex);
+}
+
 void CameraCapture::CaptureLoop() {
     AVPacket* packet = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
@@ -159,21 +179,34 @@ void CameraCapture::CaptureLoop() {
     rgbFrame->height = m_codecCtx->height;
     av_frame_get_buffer(rgbFrame, 32);
 
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> d3dTexture = CreateStagingTexture(m_codecCtx->width, m_codecCtx->height);
-
     while (m_running) {
-        if (av_read_frame(m_formatCtx, packet) >= 0) {
+        int readResult = av_read_frame(m_formatCtx, packet);
+        if (readResult >= 0) {
             if (packet->stream_index == m_videoStreamIndex) {
                 if (avcodec_send_packet(m_codecCtx, packet) == 0) {
                     while (avcodec_receive_frame(m_codecCtx, frame) == 0) {
                         sws_scale(m_swsCtx, frame->data, frame->linesize, 0, m_codecCtx->height,
                                   rgbFrame->data, rgbFrame->linesize);
 
+                        auto d3dTexture = GetTextureFromPool(m_codecCtx->width, m_codecCtx->height);
                         if (d3dTexture && m_context) {
-                            m_context->UpdateSubresource(d3dTexture.Get(), 0, nullptr,
-                                                         rgbFrame->data[0], rgbFrame->linesize[0], 0);
+                            // Protect multithreaded immediate context access
+                            ComPtr<ID3D11Multithread> multiThread;
+                            if (SUCCEEDED(m_context.As(&multiThread))) {
+                                multiThread->Enter();
+                                m_context->UpdateSubresource(d3dTexture.Get(), 0, nullptr,
+                                                             rgbFrame->data[0], rgbFrame->linesize[0], 0);
+                                m_context->Flush();
+                                multiThread->Leave();
+                            } else {
+                                m_context->UpdateSubresource(d3dTexture.Get(), 0, nullptr,
+                                                             rgbFrame->data[0], rgbFrame->linesize[0], 0);
+                            }
 
                             std::lock_guard<std::mutex> lock(m_frameMutex);
+                            if (m_hasNewFrame && m_latestFrame.texture) {
+                                ReturnTexture(m_latestFrame.texture);
+                            }
                             m_latestFrame.texture = d3dTexture;
                             m_latestFrame.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
                                 std::chrono::high_resolution_clock::now().time_since_epoch()).count();
@@ -183,6 +216,9 @@ void CameraCapture::CaptureLoop() {
                 }
             }
             av_packet_unref(packet);
+        } else {
+            // Stream disconnected or EOF, wait a bit
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
 
