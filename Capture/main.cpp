@@ -345,10 +345,10 @@ public:
         if (!RegisterHotKey(m_hWnd, HOTKEY_START_STOP, 0, VK_F9)) {
             spdlog::warn("Failed to register F9 hotkey for Start/Stop");
         }
-        if (!RegisterHotKey(m_hWnd, HOTKEY_SCREENSHOT, 0, VK_F12)) {
-            spdlog::warn("Failed to register F12 hotkey for Screenshot");
+        if (!RegisterHotKey(m_hWnd, HOTKEY_SCREENSHOT, 0, VK_F10)) {
+            spdlog::warn("Failed to register F10 hotkey for Screenshot");
         }
-        spdlog::info("Hotkeys registered: F9=Start/Stop, F12=Screenshot");
+        spdlog::info("Hotkeys registered: F9=Start/Stop, F10=Screenshot");
 
         ShowWindow(m_hWnd, nCmdShow);
         UpdateWindow(m_hWnd);
@@ -1083,7 +1083,7 @@ private:
                     ImGui::Text("Start / Stop Recording");
 
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.9f, 0.3f, 1.0f));
-                    ImGui::Text("F12");
+                    ImGui::Text("F10");
                     ImGui::PopStyleColor();
                     ImGui::SameLine(80);
                     ImGui::Text("Take Screenshot");
