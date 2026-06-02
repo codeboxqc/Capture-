@@ -1,0 +1,60 @@
+=============================================================================
+                          CAPTURE ENGINE - WIKI
+=============================================================================
+
+OVERVIEW
+--------
+The Capture Engine is a high-performance screen, region, and audio recording
+utility designed for Windows. Built heavily on DirectX (D3D11/D3D12), Windows
+Media Foundation, WASAPI, and FFmpeg, it focuses on near-lossless, zero-drop
+recording using advanced hardware acceleration and deep memory buffering.
+
+FEATURES
+--------
+* High-Performance Capture: Utilizes DirectX Desktop Duplication API for
+  zero-latency screen capture.
+* Hardware Encoding: Natively leverages NVIDIA NVENC, AMD AMF, and Intel QSV
+  for H.264, H.265 (HEVC), and AV1 hardware encoding.
+* High Color Fidelity: Supports 4:4:4 chroma subsampling (YUV444P) and
+  high-quality Lanczos scaling for perfect visual quality and text clarity.
+* Multi-Source Input: Capture full screen, custom regions, USB Video Devices
+  (webcams/capture cards), and IP Camera streams (RTSP/HTTP).
+* Advanced Audio: Multi-track WASAPI system audio and USB microphone capture.
+* Burst Buffering: Uses large RAM buffers and memory locking (Large Pages) to
+  absorb high-bitrate I/O spikes and prevent frame drops during NVMe writes.
+* Cross-Adapter Support: Seamlessly handles setups where capture and encoding
+  occur on different GPUs.
+
+SYSTEM REQUIREMENTS
+-------------------
+To ensure a smooth, drop-free recording experience, especially at 4K or
+high frame rates (120+ FPS), the following minimum and recommended hardware
+specifications apply.
+
+MINIMUM REQUIREMENTS
+* Operating System: Windows 10 (64-bit) or later.
+* CPU: Intel Core i5 (6th Gen) or AMD Ryzen 5 (1st Gen).
+* RAM: 8 GB DDR4.
+* GPU: Dedicated GPU with hardware video encoding support
+  (NVIDIA GTX 900 series, AMD RX 400 series, or Intel UHD Graphics 600).
+* Storage: SSD with at least 500 MB/s write speed.
+* DirectX: DirectX 11 or 12 compatible hardware.
+
+RECOMMENDED REQUIREMENTS (For 4K / High FPS / Near-Lossless)
+* Operating System: Windows 11 (64-bit).
+* CPU: Intel Core i7 (10th Gen) or AMD Ryzen 7 (3000 series) or better.
+* RAM: 16 GB DDR4/DDR5 (Highly recommended to allow large RAM burst buffers).
+* GPU: NVIDIA RTX 2000 series or newer (for advanced NVENC HEVC/AV1 encoding),
+       AMD RX 6000 series, or Intel Arc.
+* VRAM: 6 GB or more dedicated Video RAM.
+* Storage: NVMe M.2 SSD with 3,000+ MB/s sustained write speeds.
+
+NOTES FOR ENABLING ADVANCED FEATURES
+------------------------------------
+* Microsoft Store Compatibility: Configuration and log files are safely saved
+  to the user's `%LocalAppData%\RecordingEngine` folder.
+* Large Pages Support: The application requests 'Lock Pages in Memory'
+  privileges to use Large Pages, which vastly improves heavy I/O performance.
+  (Requires running the application as Administrator or adjusting local security policies).
+
+=============================================================================
