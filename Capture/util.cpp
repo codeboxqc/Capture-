@@ -1,5 +1,30 @@
 #include <windows.h>
+#include <shlobj.h>
 #include <iostream>
+#include <string>
+#include <filesystem>
+
+// Get the user data folder path (LocalAppData/RecordingEngine) for Microsoft Store compatibility
+std::string GetUserDataFolderPath() {
+    PWSTR path = nullptr;
+    std::string result = "";
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path))) {
+        std::filesystem::path fsPath(path);
+        fsPath /= "RecordingEngine";
+        
+        std::error_code ec;
+        if (!std::filesystem::exists(fsPath, ec)) {
+            std::filesystem::create_directories(fsPath, ec);
+        }
+        
+        result = fsPath.string();
+        CoTaskMemFree(path);
+    } else {
+        // Fallback to current directory if AppData fails
+        result = ".";
+    }
+    return result;
+}
 
 // Use large pages to lock RAM buffering in memory for zero-drop NVMe writing
 void EnableLargePages() {
