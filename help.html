@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Capture Engine - Help & Documentation</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --container-bg: #1e1e1e;
+            --text-color: #e0e0e0;
+            --accent-color: #ff4d4d;
+            --accent-hover: #ff6666;
+            --border-color: #333;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+        }
+
+        header {
+            background-color: #000;
+            border-bottom: 2px solid var(--accent-color);
+            padding: 20px 0;
+            text-align: center;
+        }
+
+        header h1 {
+            margin: 0;
+            color: var(--accent-color);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 40px auto;
+            background-color: var(--container-bg);
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            border: 1px solid var(--border-color);
+        }
+
+        h2 {
+            color: var(--accent-color);
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 10px;
+            margin-top: 30px;
+        }
+
+        h3 {
+            color: #fff;
+            margin-top: 20px;
+        }
+
+        p {
+            margin-bottom: 15px;
+        }
+
+        ul {
+            margin-bottom: 20px;
+            padding-left: 20px;
+        }
+
+        li {
+            margin-bottom: 8px;
+        }
+
+        code {
+            background-color: #2a2a2a;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: Consolas, monospace;
+            color: #ffa1a1;
+        }
+
+        pre {
+            background-color: #0a0a0a;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            border: 1px solid var(--border-color);
+        }
+
+        pre code {
+            background-color: transparent;
+            padding: 0;
+            color: #00ff00;
+        }
+
+        .hotkey {
+            display: inline-block;
+            background-color: #333;
+            color: #fff;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            border-bottom: 2px solid #111;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+        }
+
+        .license-box {
+            background-color: rgba(255, 77, 77, 0.1);
+            border-left: 4px solid var(--accent-color);
+            padding: 15px;
+            margin: 20px 0;
+        }
+
+        a {
+            color: var(--accent-hover);
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 20px;
+            font-size: 0.9em;
+            color: #888;
+            border-top: 1px solid var(--border-color);
+            margin-top: 40px;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Capture Engine Documentation</h1>
+        <p>High-Performance Open Source Screen Recording</p>
+    </header>
+
+    <div class="container">
+
+        <h2>About The Program</h2>
+        <p>The <strong>Capture Engine</strong> is a high-performance, open-source screen, region, and audio recording utility built natively for Windows. It utilizes the DirectX Desktop Duplication API, Windows Media Foundation, WASAPI, and hardware encoding (NVIDIA NVENC, AMD AMF, Intel QSV) to achieve zero-drop, near-lossless 4K recording.</p>
+
+        <div class="license-box">
+            <h3>License: Freeware & "As-Is"</h3>
+            <p>This software is provided <strong>Free of Charge (Freeware)</strong> and <strong>Open Source</strong>. It is provided "AS IS", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability arising from the use of the software.</p>
+        </div>
+
+        <h2>Acknowledgements & Libraries</h2>
+        <p>This project stands on the shoulders of giants. We sincerely thank the open-source community and the developers of the following libraries used in this application:</p>
+        <ul>
+            <li><strong><a href="https://ffmpeg.org/" target="_blank">FFmpeg</a></strong>: The core audio/video multiplexing and encoding framework.</li>
+            <li><strong><a href="https://github.com/ocornut/imgui" target="_blank">Dear ImGui</a></strong>: For the incredibly fast and bloat-free immediate mode graphical user interface.</li>
+            <li><strong><a href="https://github.com/gabime/spdlog" target="_blank">spdlog</a></strong>: For extremely fast, asynchronous C++ logging.</li>
+            <li><strong><a href="https://github.com/nlohmann/json" target="_blank">nlohmann/json</a></strong>: For JSON parsing and configuration management.</li>
+            <li><strong>Microsoft DirectX (D3D11/D3D12)</strong>: For low-latency hardware texture capture.</li>
+            <li><strong>OpenSSL & ZLIB</strong>: For network stream support (RTSP/IP cameras) via FFmpeg.</li>
+        </ul>
+
+        <h2>Compilation & vcpkg Instructions</h2>
+        <p>To compile this project from source, you will need Visual Studio 2022 (with C++ Desktop development) and <strong>vcpkg</strong> installed for dependency management.</p>
+
+        <h3>1. Install vcpkg dependencies</h3>
+        <p>Run the following command in your terminal to install the necessary DLLs and libraries for a 64-bit Windows build:</p>
+        <pre><code>vcpkg install ffmpeg imgui spdlog nlohmann-json taskflow openssl zlib --triplet x64-windows</code></pre>
+
+        <h3>2. Build the Application</h3>
+        <p>You can use CMake and Ninja to build the application. From the `Capture` directory:</p>
+        <pre><code>cd Capture
+cmake -B build -G Ninja
+cmake --build build</code></pre>
+
+        <h2>Shortcut Keys</h2>
+        <p>These global hotkeys work even when the application is minimized or in the background:</p>
+        <ul>
+            <li><span class="hotkey">F9</span> - <strong>Start / Stop Recording</strong></li>
+            <li><span class="hotkey">F10</span> - <strong>Take Screenshot</strong></li>
+        </ul>
+
+        <h2>User Interface Menus</h2>
+
+        <h3>1. Main Settings Tab</h3>
+        <ul>
+            <li><strong>Quality Preset:</strong> Choose between Lossless, High, Medium, or Low. This adjusts the CRF/QP values dynamically for hardware encoders.</li>
+            <li><strong>Output Resolution & FPS:</strong> Set the target dimensions (e.g., 3840x2160, 1920x1080) and target frame rate (up to 120 FPS+).</li>
+            <li><strong>Codec & Container:</strong> Choose H.264, H.265 (HEVC), or AV1. MKV is the recommended container to prevent corruption on crash.</li>
+            <li><strong>Output Folder:</strong> Where your `.mkv` files and screenshots are saved.</li>
+            <li><strong>Mouse Cursor:</strong> Toggle visibility, add click highlight rings, and customize highlight colors.</li>
+        </ul>
+
+        <h3>2. Capture Sources Tab</h3>
+        <ul>
+            <li><strong>Display Capture:</strong> Select which monitor to capture using Desktop Duplication.</li>
+            <li><strong>Region Capture:</strong> Set specific X, Y, Width, and Height coordinates to record a portion of the screen.</li>
+            <li><strong>USB Capture Devices:</strong> Select webcams or capture cards (e.g., Elgato, generic USB video).</li>
+            <li><strong>Camera Stream (IP/URL):</strong> Enter an RTSP/HTTP URL to record from network security cameras. (Overrides local capture).</li>
+        </ul>
+
+        <h3>3. Diagnostics Tab</h3>
+        <ul>
+            <li><strong>System Memory:</strong> Live view of RAM usage. The engine utilizes large empty RAM blocks to buffer video frames, preventing stutters.</li>
+            <li><strong>Selected GPU Info:</strong> View dedicated VRAM and capabilities (H.264/H.265/AV1 Encode/Decode support).</li>
+        </ul>
+
+        <div class="footer">
+            <p>Thank you for using Capture Engine! If you find this software helpful, consider supporting open-source development.</p>
+        </div>
+    </div>
+</body>
+</html>
