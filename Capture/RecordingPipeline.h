@@ -200,7 +200,7 @@ public:
     }
 
 private:
-    std::atomic<bool> m_screenshotRequested{ false };
+    bool m_screenshotRequested = false;
     std::mutex m_screenshotMutex;
     std::condition_variable m_screenshotCv;
     std::string m_screenshotPath;
@@ -266,6 +266,11 @@ private:
             return false;
         }
 
+        ComPtr<ID3D10Multithread> multiThread;
+        if (SUCCEEDED(device.As(&multiThread))) {
+            multiThread->SetMultithreadProtected(TRUE);
+        }
+
         bool success = false;
         if (m_settings.usbDeviceIndex >= 0) {
             auto usb = std::make_unique<SimpleUSBCapture>();
@@ -318,6 +323,11 @@ private:
                     spdlog::info("Screenshot: Cross-adapter capture needed");
                     D3D11CreateDevice(displayAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
                         D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &captureDevice, nullptr, &captureContext);
+
+                    ComPtr<ID3D10Multithread> capMultiThread;
+                    if (SUCCEEDED(captureDevice.As(&capMultiThread))) {
+                        capMultiThread->SetMultithreadProtected(TRUE);
+                    }
                 }
 
                 auto cap = std::make_unique<FrameCapture>();
@@ -516,6 +526,9 @@ private:
 
         if (avcodec_open2(c, codec, nullptr) < 0) {
             avcodec_free_context(&c);
+            spdlog::warn("Failed to open PNG encoder, falling back to BMP");
+            if (path.size() > 4) path.replace(path.size() - 3, 3, "bmp");
+            SaveRawBgraToBmp(bgraData, width, height, stride, path);
             return;
         }
 
@@ -1123,17 +1136,21 @@ private:
 
             // Handle screenshot request - MUST be after getting a frame to have texture available
             // but BEFORE potential 'continue' or errors to ensure responsiveness.
-            if (m_screenshotRequested && gotFrame && frame.texture) {
+            if (gotFrame && frame.texture) {
+                bool shouldCaptureScreenshot = false;
                 {
                     std::lock_guard<std::mutex> lock(m_screenshotMutex);
-                    // Double check inside lock
                     if (m_screenshotRequested) {
-                        // FIX: Use capture device/context for screenshot since frame texture is on that adapter
-                        SaveTextureAsPngAsync(m_captureD3D11Device, m_captureD3D11Context, frame.texture, m_screenshotPath);
+                        shouldCaptureScreenshot = true;
                         m_screenshotRequested = false;
                     }
                 }
-                m_screenshotCv.notify_all();
+
+                if (shouldCaptureScreenshot) {
+                    // FIX: Use capture device/context for screenshot since frame texture is on that adapter
+                    SaveTextureAsPngAsync(m_captureD3D11Device, m_captureD3D11Context, frame.texture, m_screenshotPath);
+                    m_screenshotCv.notify_all();
+                }
             }
 
             if (!gotFrame || !frame.texture) continue;
