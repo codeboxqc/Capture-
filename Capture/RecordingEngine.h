@@ -96,6 +96,14 @@ struct ExtendedGPUInfo : public GPUInfo {
 
 // ========== Recording Settings ==========
 struct RecordingSettings {
+
+    // --- NEW: Region Capture ---
+    bool captureRegion = false;
+    int regionX = 0;
+    int regionY = 0;
+    int regionWidth = 0;
+    int regionHeight = 0;
+
     uint32_t width = 3840;
     uint32_t height = 2160;
     uint32_t fps = 120;
