@@ -28,7 +28,9 @@
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 extern void EnableLargePages();
+extern std::string GetUserDataFolderPath();
 
+std::string g_iniFilePath;
 std::shared_ptr<IRecordingEngine> g_engine;
 std::mutex g_engineMutex;
 RecordingSettings g_settings;
@@ -403,6 +405,10 @@ private:
         // Load a nicer font (optional - uses default if not available)
         ImGuiIO& io = ImGui::GetIO();
         io.Fonts->AddFontDefault();
+
+        // Save imgui.ini to UserDataFolder so the exe directory remains read-only
+        g_iniFilePath = GetUserDataFolderPath() + "\\imgui.ini";
+        io.IniFilename = g_iniFilePath.c_str();
 
         ImGui_ImplWin32_Init(m_hWnd);
         ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);

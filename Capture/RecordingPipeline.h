@@ -21,6 +21,8 @@
 #include <vector>
 #include <memory>
 
+extern std::string GetUserDataFolderPath();
+
 class RecordingPipeline : public IRecordingEngine {
 public:
     RecordingPipeline() : m_recording(false), m_droppedFrames(0), m_systemMemory(0),
@@ -1036,8 +1038,9 @@ private:
 
     void SetupLogging() {
         try {
+            std::string logFilePath = GetUserDataFolderPath() + "\\recording.log";
             auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-            auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("recording.log", 1024 * 1024 * 10, 3);
+            auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(logFilePath, 1024 * 1024 * 10, 3);
             std::vector<spdlog::sink_ptr> sinks{ console_sink, rotating_sink };
             auto logger = std::make_shared<spdlog::logger>("multi_sink", sinks.begin(), sinks.end());
             spdlog::set_default_logger(logger);
