@@ -616,6 +616,7 @@ private:
         return (ret >= 0);  // Some options may not exist, that's OK
     }
 
+
     bool PrepareSystemMemoryFrame(const CapturedFrame& frame, AVFrame* avFrame) {
         avFrame->format = m_codecContext->pix_fmt;
         avFrame->width = m_codecContext->width;
@@ -626,10 +627,24 @@ private:
             return false;
         }
 
-        // Copy to staging texture
-        m_d3d11Context->CopyResource(m_stagingTexture.Get(), frame.texture.Get());
+
+        // Copy to staging texture (apply region crop if enabled)
+        if (m_settings.captureRegion && m_settings.regionWidth > 0 && m_settings.regionHeight > 0) {
+            D3D11_BOX box;
+            box.left = m_settings.regionX;
+            box.right = m_settings.regionX + m_settings.regionWidth;
+            box.top = m_settings.regionY;
+            box.bottom = m_settings.regionY + m_settings.regionHeight;
+            box.front = 0;
+            box.back = 1;
+            m_d3d11Context->CopySubresourceRegion(m_stagingTexture.Get(), 0, 0, 0, 0, frame.texture.Get(), 0, &box);
+        } else {
+            m_d3d11Context->CopyResource(m_stagingTexture.Get(), frame.texture.Get());
+        }
+
 
         D3D11_MAPPED_SUBRESOURCE mapped;
+
         HRESULT hr = m_d3d11Context->Map(m_stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
         if (FAILED(hr)) {
             spdlog::error("Failed to map staging texture: 0x{:08X}", static_cast<uint32_t>(hr));
@@ -645,6 +660,7 @@ private:
 
         return true;
     }
+
 
     bool PrepareHardwareFrame(const CapturedFrame& frame, AVFrame* avFrame) {
         avFrame->format = AV_PIX_FMT_D3D11;
@@ -680,11 +696,27 @@ private:
             return false;
         }
 
-        m_d3d11Context->CopySubresourceRegion(dstTex, dstSubresource, 0, 0, 0, srcTex, 0, nullptr);
+
+        // Apply region crop if enabled
+        if (m_settings.captureRegion && m_settings.regionWidth > 0 && m_settings.regionHeight > 0) {
+            D3D11_BOX box;
+            box.left = m_settings.regionX;
+            box.right = m_settings.regionX + m_settings.regionWidth;
+            box.top = m_settings.regionY;
+            box.bottom = m_settings.regionY + m_settings.regionHeight;
+            box.front = 0;
+            box.back = 1;
+            m_d3d11Context->CopySubresourceRegion(dstTex, dstSubresource, 0, 0, 0, srcTex, 0, &box);
+        } else {
+            m_d3d11Context->CopySubresourceRegion(dstTex, dstSubresource, 0, 0, 0, srcTex, 0, nullptr);
+        }
+
+
         m_d3d11Context->Flush(); // Ensure hardware copy is complete before encoding starts
 
         return true;
     }
+
 
     ComPtr<ID3D11Device> m_d3d11Device;
     ComPtr<ID3D11DeviceContext> m_d3d11Context;

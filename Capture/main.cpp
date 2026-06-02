@@ -2,6 +2,7 @@
 #include "RecordingPipeline.h"
 #include "GPUDetector.h"
 #include "VirtualDisplayManager.h"
+#include "region.h"
 #include "USB.h"
 #include <filesystem>
 #include <windows.h>
@@ -535,9 +536,11 @@ private:
             ImGui::SetWindowFontScale(1.0f);
             ImGui::PopStyleColor();
 
-            ImGui::SameLine(ImGui::GetWindowWidth() - 120);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
-            ImGui::Text("PRO EDITION");
+            ImGui::SameLine(ImGui::GetWindowWidth() - 150);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.6f, 1.0f, 1.0f));
+            if (ImGui::Button("Open source github")) {
+                ShellExecuteA(nullptr, "open", "https://github.com/codeboxqc/Capture-", nullptr, nullptr, SW_SHOWNORMAL);
+            }
             ImGui::PopStyleColor();
 
             ImGui::Spacing();
@@ -703,7 +706,33 @@ private:
                     ImGui::Separator();
                     ImGui::Spacing();
 
-                    // Output Settings
+
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    // Region Capture
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("REGION CAPTURE");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
+                    ImGui::Checkbox("Enable Region Capture", &g_settings.captureRegion);
+                    if (g_settings.captureRegion) {
+                        ImGui::SameLine();
+                        if (ImGui::Button("Select Region", ImVec2(120, 0))) {
+                            CaptureRegion r = RegionSelector::SelectRegion();
+                            if (r.isValid) {
+                                g_settings.regionX = r.x;
+                                g_settings.regionY = r.y;
+                                g_settings.regionWidth = r.width;
+                                g_settings.regionHeight = r.height;
+                            }
+                        }
+                        ImGui::Text("Selected Region: %d, %d - %d x %d", g_settings.regionX, g_settings.regionY, g_settings.regionWidth, g_settings.regionHeight);
+                    }
+
+// Output Settings
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
                     ImGui::Text("OUTPUT");
                     ImGui::PopStyleColor();
@@ -1112,7 +1141,27 @@ private:
                     ImGui::EndTabItem();
                 }
 
-                ImGui::EndTabBar();
+
+                // --- TAB: FREEWARE ---
+                if (ImGui::BeginTabItem("  Freeware  ")) {
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("FREEWARE AS IS");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
+                    ImGui::TextWrapped("This software is provided as freeware. If you find it useful, consider buying me a coffee!");
+                    ImGui::Spacing();
+                    if (ImGui::Button("Buy Me A Coffee", ImVec2(200, 40))) {
+                        ShellExecuteA(nullptr, "open", "https://buymeacoffee.com/www.nutz.club", nullptr, nullptr, SW_SHOWNORMAL);
+                    }
+
+                    ImGui::EndTabItem();
+                }
+
+ImGui::EndTabBar();
             }
             ImGui::End();
         }

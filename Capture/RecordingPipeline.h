@@ -777,6 +777,7 @@ private:
             return false;
         }
 
+
         m_displayManager->SetActiveDisplay(settings.displayIndex);
         ComPtr<IDXGIOutput> targetDisplayOutput = m_displayManager->GetActiveDisplayOutput();
 
@@ -785,10 +786,54 @@ private:
             return false;
         }
 
+        // --- NEW: Calculate Region Cropping ---
+        RecordingSettings activeSettings = settings;
+
+        size_t displayIdx = (settings.displayIndex < m_displayManager->GetDisplayCount()) ? settings.displayIndex : 0;
+        const auto& displayInfo = m_displayManager->GetDisplayInfo(displayIdx);
+        activeSettings.width = displayInfo.width;
+        activeSettings.height = displayInfo.height;
+
+        if (activeSettings.captureRegion && activeSettings.regionWidth > 0 && activeSettings.regionHeight > 0) {
+            // Map global screen coordinates to monitor-local coordinates
+            int localX = activeSettings.regionX - displayInfo.positionX;
+            int localY = activeSettings.regionY - displayInfo.positionY;
+
+            localX = std::max(0, localX);
+            localY = std::max(0, localY);
+
+            int cropWidth = std::min((int)displayInfo.width - localX, activeSettings.regionWidth);
+            int cropHeight = std::min((int)displayInfo.height - localY, activeSettings.regionHeight);
+
+            if (cropWidth > 0 && cropHeight > 0) {
+                // Dimensions should be even
+                activeSettings.width = cropWidth & ~1;
+                activeSettings.height = cropHeight & ~1;
+                activeSettings.regionX = localX;
+                activeSettings.regionY = localY;
+                activeSettings.regionWidth = activeSettings.width;
+                activeSettings.regionHeight = activeSettings.height;
+                spdlog::info("Region capture enabled: {}x{} at {},{}", activeSettings.width, activeSettings.height, localX, localY);
+            } else {
+                spdlog::warn("Region outside selected display, falling back to full screen.");
+                activeSettings.captureRegion = false;
+            }
+        }
+
+
+
+
         const auto& activeDisplay = m_displayManager->GetActiveDisplayInfo();
-        if (activeDisplay.width > 0 && activeDisplay.height > 0) {
-            m_settings.width = activeDisplay.width;
-            m_settings.height = activeDisplay.height;
+        if (activeSettings.width > 0 && activeSettings.height > 0) {
+            m_settings.width = activeSettings.width;
+            m_settings.height = activeSettings.height;
+            m_settings.captureRegion = activeSettings.captureRegion;
+            m_settings.regionX = activeSettings.regionX;
+            m_settings.regionY = activeSettings.regionY;
+            m_settings.regionWidth = activeSettings.regionWidth;
+            m_settings.regionHeight = activeSettings.regionHeight;
+
+
 
             // FIX: Keep user's FPS setting, don't override with display refresh rate
             // Just log the display refresh rate for reference
