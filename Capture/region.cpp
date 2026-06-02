@@ -85,8 +85,8 @@ LRESULT CALLBACK RegionSelector::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             ClientToScreen(hwnd, &ptStart);
             ClientToScreen(hwnd, &ptEnd);
 
-            s_selectedRegion.x = std::min(ptStart.x, ptEnd.x);
-            s_selectedRegion.y = std::min(ptStart.y, ptEnd.y);
+            s_selectedRegion.x = (std::min)(ptStart.x, ptEnd.x);
+            s_selectedRegion.y = (std::min)(ptStart.y, ptEnd.y);
             s_selectedRegion.width = abs(ptEnd.x - ptStart.x);
             s_selectedRegion.height = abs(ptEnd.y - ptStart.y);
             s_selectedRegion.isValid = (s_selectedRegion.width > 0 && s_selectedRegion.height > 0);
@@ -115,10 +115,10 @@ LRESULT CALLBACK RegionSelector::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
             if (s_isDragging) {
                 // Clear the selected region
-                int left = std::min(s_startPoint.x, s_endPoint.x);
-                int top = std::min(s_startPoint.y, s_endPoint.y);
-                int right = std::max(s_startPoint.x, s_endPoint.x);
-                int bottom = std::max(s_startPoint.y, s_endPoint.y);
+                int left = (std::min)(s_startPoint.x, s_endPoint.x);
+                int top = (std::min)(s_startPoint.y, s_endPoint.y);
+                int right = (std::max)(s_startPoint.x, s_endPoint.x);
+                int bottom = (std::max)(s_startPoint.y, s_endPoint.y);
 
                 // Draw selection border
                 HPEN borderPen = CreatePen(PS_SOLID, 2, RGB(255, 0, 0));
