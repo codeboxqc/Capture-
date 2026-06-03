@@ -468,6 +468,11 @@ private:
                         StopRecording();
                         std::lock_guard<std::mutex> statusLock(g_statusMutex);
                         g_statusMessage = "Ready";
+
+                        // Reset duration variables back to zero
+                        g_durationHours = 0;
+                        g_durationMinutes = 0;
+                        g_durationSeconds = 0;
                     }
                 }
             }

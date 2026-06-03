@@ -38,6 +38,10 @@ public:
         , m_fps(30)
         , m_comInitialized(false)
         , m_mfInitialized(false)
+        , m_anchorMfTime(0)
+        , m_anchorQpcUs(0)
+        , m_clockAnchored(false)
+        , m_lastDeviceTimestamp(0)
         , m_bufferSize(8)
         , m_bytesPerPixel(4)
         , m_isYUY2(false)
@@ -507,6 +511,12 @@ private:
                 &sample
             );
 
+            // Immediately capture QPC to anchor the MF timestamp
+            LARGE_INTEGER qpcFreq, qpcNow;
+            QueryPerformanceFrequency(&qpcFreq);
+            QueryPerformanceCounter(&qpcNow);
+            uint64_t qpcUs = (qpcNow.QuadPart * 1000000ULL) / static_cast<uint64_t>(qpcFreq.QuadPart);
+
             // Check if we should stop
             if (!m_running) break;
 
@@ -588,11 +598,27 @@ private:
                 USBFrame frame;
                 frame.texture = texture;
                 
-                // Use high-precision QPC timestamp
-                LARGE_INTEGER qpcFreq, qpcNow;
-                QueryPerformanceFrequency(&qpcFreq);
-                QueryPerformanceCounter(&qpcNow);
-                frame.timestamp = (qpcNow.QuadPart * 1000000) / qpcFreq.QuadPart;
+                // Skip backwards-going timestamps
+                if (timestamp < m_lastDeviceTimestamp && m_lastDeviceTimestamp > 0) {
+                    spdlog::debug("Skipping backwards video timestamp");
+                } else {
+                    m_lastDeviceTimestamp = timestamp;
+
+                    if (!m_clockAnchored && timestamp > 0) {
+                        m_anchorMfTime = timestamp;
+                        m_anchorQpcUs = qpcUs;
+                        m_clockAnchored = true;
+                        spdlog::info("USB video clock anchor set: MF={} QPC_us={}", timestamp, qpcUs);
+                    }
+                }
+
+                // Calculate synchronized timestamp
+                if (m_clockAnchored && timestamp > 0) {
+                    int64_t deltaMfUs = static_cast<int64_t>(timestamp - m_anchorMfTime) / 10;
+                    frame.timestamp = static_cast<uint64_t>(static_cast<int64_t>(m_anchorQpcUs) + deltaMfUs);
+                } else {
+                    frame.timestamp = qpcUs;
+                }
 
                 frame.frameIndex = static_cast<uint32_t>(m_frameCount++);
                 frame.isKeyframe = (frame.frameIndex % (m_fps > 0 ? m_fps : 60) == 0);
@@ -816,6 +842,12 @@ private:
 
     bool m_comInitialized;
     bool m_mfInitialized;
+
+    // --- A/V SYNC: QPC<->MF clock anchor ---
+    LONGLONG m_anchorMfTime;
+    uint64_t m_anchorQpcUs;
+    bool m_clockAnchored;
+    LONGLONG m_lastDeviceTimestamp;
 
     uint32_t m_bytesPerPixel;
     bool m_isYUY2;
