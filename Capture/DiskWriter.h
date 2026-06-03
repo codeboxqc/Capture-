@@ -309,7 +309,7 @@ private:
     }
 
     void WriteVideo(WriteTask& task) {
-        if (task.timestamp < m_startTimestamp) return;
+
 
         AVPacket* pkt = av_packet_alloc();
         if (!pkt) {
@@ -326,8 +326,8 @@ private:
         memcpy(pkt->data, task.data.data(), task.data.size());
         pkt->stream_index = m_videoStream->index;
 
-        // FIX: Calculate PTS in milliseconds from recording start
-        int64_t elapsed_us = static_cast<int64_t>(task.timestamp - m_startTimestamp);
+        // Calculate PTS in milliseconds from recording start, handling negative values safely
+        int64_t elapsed_us = static_cast<int64_t>(task.timestamp) - static_cast<int64_t>(m_startTimestamp);
         int64_t pts_ms = elapsed_us / 1000;  // Convert to milliseconds
 
         // FIX: Ensure strictly monotonic PTS
@@ -355,7 +355,7 @@ private:
 
     void WriteAudio(WriteTask& task) {
         if (!m_audioStream) return;
-        if (task.timestamp < m_startTimestamp) return;
+
 
         AVPacket* pkt = av_packet_alloc();
         if (!pkt) return;
@@ -369,8 +369,8 @@ private:
         memcpy(pkt->data, task.data.data(), task.data.size());
         pkt->stream_index = m_audioStream->index;
 
-        // FIX: Calculate audio PTS from recording start
-        int64_t elapsed_us = static_cast<int64_t>(task.timestamp - m_startTimestamp);
+        // Calculate audio PTS from recording start, handling negative values safely
+        int64_t elapsed_us = static_cast<int64_t>(task.timestamp) - static_cast<int64_t>(m_startTimestamp);
         int64_t pts_samples = av_rescale_q(elapsed_us, { 1, 1000000 }, m_audioStream->time_base);
 
         // Ensure monotonic
