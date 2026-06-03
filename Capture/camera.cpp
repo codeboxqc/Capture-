@@ -1,3 +1,4 @@
+#include <windows.h>
 #include "camera.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
@@ -208,8 +209,10 @@ void CameraCapture::CaptureLoop() {
                                 ReturnTexture(m_latestFrame.texture);
                             }
                             m_latestFrame.texture = d3dTexture;
-                            m_latestFrame.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
-                                std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+                            LARGE_INTEGER qpcFreq, qpcNow;
+                            QueryPerformanceFrequency(&qpcFreq);
+                            QueryPerformanceCounter(&qpcNow);
+                            m_latestFrame.timestamp = (qpcNow.QuadPart * 1000000) / qpcFreq.QuadPart;
                             m_hasNewFrame = true;
                         }
                     }

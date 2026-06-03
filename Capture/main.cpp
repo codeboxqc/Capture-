@@ -47,7 +47,7 @@ float g_bitrateMbps = 50.0f;
 // New time recording variables
 int g_recordingMode = 0; // 0 = Duration, 1 = Schedule
 int g_durationHours = 0;
-int g_durationMinutes = 2; // Default 2 minutes
+int g_durationMinutes = 0; // Default 0 minutes
 int g_durationSeconds = 0;
 int g_startHour = 7; // Default 7:00
 int g_startMinute = 0;
