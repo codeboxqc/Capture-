@@ -135,13 +135,9 @@ public:
                 std::unique_lock<std::mutex> lock(m_queueMutex);
                 m_taskAvailable.wait(lock, [this] { return !m_taskQueue.empty() || !m_running; });
 
-                // FIX: Exit immediately when stopped - don't drain remaining queue
-                // This prevents audio from extending past video
-                if (!m_running) {
-                    size_t remaining = m_taskQueue.size();
-                    if (remaining > 0) {
-                        spdlog::info("Stopping writer, discarding {} queued tasks", remaining);
-                    }
+                // Exit only if running is false AND the queue is empty
+                // This ensures all buffered video/audio frames are written to disk before stopping
+                if (!m_running && m_taskQueue.empty()) {
                     break;
                 }
 
@@ -151,11 +147,7 @@ public:
                 m_taskQueue.pop();
                 lock.unlock();
 
-                // Set start timestamp from FIRST packet
-                if (m_startTimestamp == 0 && task.timestamp > 0) {
-                    m_startTimestamp = task.timestamp;
-                    spdlog::info("Recording start timestamp set: {}", m_startTimestamp);
-                }
+
 
                 // Track last video timestamp
                 if (task.isVideo) {
@@ -165,6 +157,12 @@ public:
                 if (!m_headerWritten) {
                     // We MUST start with a video keyframe with valid extradata
                     if (task.isVideo && task.keyframe && m_videoStream->codecpar->extradata_size > 0) {
+                        // FIX: Set start timestamp strictly from the first video keyframe
+                        if (m_startTimestamp == 0 && task.timestamp > 0) {
+                            m_startTimestamp = task.timestamp;
+                            spdlog::info("Recording start timestamp set from first video keyframe: {}", m_startTimestamp);
+                        }
+
                         int ret = avformat_write_header(m_formatContext, nullptr);
                         if (ret < 0) {
                             char errBuf[AV_ERROR_MAX_STRING_SIZE];
@@ -216,18 +214,6 @@ public:
 
         if (m_formatContext) {
             if (m_headerWritten) {
-                // FIX: Clear any remaining tasks in queue to prevent audio overrun
-                // This prevents audio from extending past the last video frame
-                {
-                    std::lock_guard<std::mutex> lock(m_queueMutex);
-                    size_t discarded = m_taskQueue.size();
-                    if (discarded > 0) {
-                        spdlog::info("Discarding {} queued tasks at stop", discarded);
-                        std::queue<WriteTask> empty;
-                        std::swap(m_taskQueue, empty);
-                    }
-                }
-
                 // Flush buffered packets
                 av_interleaved_write_frame(m_formatContext, nullptr);
 
@@ -323,7 +309,7 @@ private:
     }
 
     void WriteVideo(WriteTask& task) {
-        if (task.timestamp < m_startTimestamp) return;
+
 
         AVPacket* pkt = av_packet_alloc();
         if (!pkt) {
@@ -340,8 +326,8 @@ private:
         memcpy(pkt->data, task.data.data(), task.data.size());
         pkt->stream_index = m_videoStream->index;
 
-        // FIX: Calculate PTS in milliseconds from recording start
-        int64_t elapsed_us = static_cast<int64_t>(task.timestamp - m_startTimestamp);
+        // Calculate PTS in milliseconds from recording start, handling negative values safely
+        int64_t elapsed_us = static_cast<int64_t>(task.timestamp) - static_cast<int64_t>(m_startTimestamp);
         int64_t pts_ms = elapsed_us / 1000;  // Convert to milliseconds
 
         // FIX: Ensure strictly monotonic PTS
@@ -353,8 +339,8 @@ private:
         pkt->pts = pts_ms;
         pkt->dts = pts_ms;
 
-        // FIX: Set duration based on FPS (in milliseconds)
-        pkt->duration = 1000 / m_fps;
+        // Calculate accurate duration using av_rescale_q and stream timebase to avoid integer truncation issues
+        pkt->duration = av_rescale_q(1, AVRational{1, (int)m_fps}, m_videoStream->time_base);
 
         if (task.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
 
@@ -369,7 +355,7 @@ private:
 
     void WriteAudio(WriteTask& task) {
         if (!m_audioStream) return;
-        if (task.timestamp < m_startTimestamp) return;
+
 
         AVPacket* pkt = av_packet_alloc();
         if (!pkt) return;
@@ -383,8 +369,8 @@ private:
         memcpy(pkt->data, task.data.data(), task.data.size());
         pkt->stream_index = m_audioStream->index;
 
-        // FIX: Calculate audio PTS from recording start
-        int64_t elapsed_us = static_cast<int64_t>(task.timestamp - m_startTimestamp);
+        // Calculate audio PTS from recording start, handling negative values safely
+        int64_t elapsed_us = static_cast<int64_t>(task.timestamp) - static_cast<int64_t>(m_startTimestamp);
         int64_t pts_samples = av_rescale_q(elapsed_us, { 1, 1000000 }, m_audioStream->time_base);
 
         // Ensure monotonic
@@ -401,7 +387,9 @@ private:
         int bytesPerSample = (bitsPerSample > 0) ? (bitsPerSample / 8) : 4;
         int frameSize = channels * bytesPerSample;
         if (frameSize > 0) {
-            pkt->duration = static_cast<int>(task.data.size()) / frameSize;
+            int numSamples = static_cast<int>(task.data.size()) / frameSize;
+            // Scale duration based on audio stream timebase
+            pkt->duration = av_rescale_q(numSamples, AVRational{1, m_audioStream->codecpar->sample_rate}, m_audioStream->time_base);
         }
 
         ret = av_interleaved_write_frame(m_formatContext, pkt);
