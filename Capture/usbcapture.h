@@ -42,6 +42,7 @@ public:
         , m_anchorQpcUs(0)
         , m_clockAnchored(false)
         , m_lastDeviceTimestamp(0)
+        , m_lastValidTimestamp(0)
         , m_bufferSize(8)
         , m_bytesPerPixel(4)
         , m_isYUY2(false)
@@ -620,6 +621,19 @@ private:
                     frame.timestamp = qpcUs;
                 }
 
+                // Smooth out micro-stutters: lock timestamp intervals to expected frame rate if within 25% tolerance
+                if (m_lastValidTimestamp > 0 && m_fps > 0) {
+                    uint64_t expectedInterval = 1000000 / m_fps;
+                    int64_t diff = static_cast<int64_t>(frame.timestamp - m_lastValidTimestamp);
+
+                    // If the delta is within 25% of expected, force it to be exactly expected
+                    // This smooths out USB scheduling jitter that causes jerky video playback
+                    if (std::abs(diff - static_cast<int64_t>(expectedInterval)) < expectedInterval / 4) {
+                        frame.timestamp = m_lastValidTimestamp + expectedInterval;
+                    }
+                }
+                m_lastValidTimestamp = frame.timestamp;
+
                 frame.frameIndex = static_cast<uint32_t>(m_frameCount++);
                 frame.isKeyframe = (frame.frameIndex % (m_fps > 0 ? m_fps : 60) == 0);
 
@@ -848,6 +862,7 @@ private:
     uint64_t m_anchorQpcUs;
     bool m_clockAnchored;
     LONGLONG m_lastDeviceTimestamp;
+    uint64_t m_lastValidTimestamp;
 
     uint32_t m_bytesPerPixel;
     bool m_isYUY2;
