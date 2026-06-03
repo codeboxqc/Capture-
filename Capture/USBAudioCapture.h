@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "RecordingEngine.h"
 #include <mfapi.h>
 #include <mfidl.h>
@@ -22,7 +22,7 @@ struct USBAudioDeviceInfo {
 // Audio packet from USB capture
 struct USBAudioPacket {
     std::vector<uint8_t> data;
-    uint64_t timestamp;
+    uint64_t timestamp;       // QPC microseconds, anchored to same clock as video
     uint32_t sampleRate;
     uint16_t channels;
     uint16_t bitsPerSample;
@@ -39,7 +39,10 @@ public:
         , m_mfInitialized(false)
         , m_bufferSize(64)
         , m_packetsProcessed(0)
-        , m_baseTimestamp(0)
+        // --- A/V SYNC: clock anchor fields ---
+        , m_anchorMfTime(0)
+        , m_anchorQpcUs(0)
+        , m_clockAnchored(false)
         , m_lastDeviceTimestamp(0)
     {
     }
@@ -256,7 +259,7 @@ public:
             return false;
         }
 
-        // FIX: Create source reader with LOW LATENCY attributes
+        // Create source reader with LOW LATENCY attributes
         ComPtr<IMFAttributes> readerAttrs;
         hr = MFCreateAttributes(&readerAttrs, 2);
         if (SUCCEEDED(hr)) {
@@ -322,7 +325,11 @@ public:
 
         m_bufferSize = bufferSize;
         m_packetsProcessed = 0;
-        m_baseTimestamp = 0;
+
+        // FIX: Reset clock anchor so it is re-established on the first live sample.
+        m_clockAnchored = false;
+        m_anchorMfTime = 0;
+        m_anchorQpcUs = 0;
         m_lastDeviceTimestamp = 0;
 
         m_running = true;
@@ -401,13 +408,37 @@ private:
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // FIX: Establish a single, one-time anchor between the MF presentation-clock
+    // domain (100ns units) and the QPC microsecond domain used by the video path.
+    //
+    // The anchor is taken on the very first live sample by reading QPC and the
+    // MF device timestamp AT THE SAME INSTANT, before any blocking sleep or queue
+    // overhead can pollute the measurement.
+    //
+    // Every subsequent sample's timestamp is then derived purely from the MF
+    // device timestamp via the anchor:
+    //
+    //   qpc_us = anchorQpcUs + (deviceTimestamp - anchorMfTime) / 10
+    //
+    // This keeps audio aligned with video regardless of ReadSample latency or
+    // scheduling jitter, because both streams share the same underlying hardware
+    // clock (QPC on Windows is backed by the same crystal as the USB SOF counter).
+    // ---------------------------------------------------------------------------
+    uint64_t MfTimeToQpcUs(LONGLONG mfTime100ns) const {
+        // mfTime100ns is in 100-nanosecond units; divide by 10 to get microseconds,
+        // then offset by the established anchor.
+        int64_t deltaMfUs = static_cast<int64_t>(mfTime100ns - m_anchorMfTime) / 10;
+        return static_cast<uint64_t>(static_cast<int64_t>(m_anchorQpcUs) + deltaMfUs);
+    }
+
     void CaptureThreadFunc() {
-        spdlog::info("USB audio capture thread started (LOW LATENCY)");
+        spdlog::info("USB audio capture thread started (LOW LATENCY, QPC-anchored)");
 
         while (m_running) {
             IMFSample* sample = nullptr;
             DWORD streamFlags = 0;
-            LONGLONG deviceTimestamp = 0;
+            LONGLONG deviceTimestamp = 0;   // MF 100ns presentation clock
 
             HRESULT hr = m_sourceReader->ReadSample(
                 MF_SOURCE_READER_FIRST_AUDIO_STREAM,
@@ -417,6 +448,14 @@ private:
                 &deviceTimestamp,
                 &sample
             );
+
+            // FIX: Capture QPC IMMEDIATELY after ReadSample returns, before any
+            // further processing.  This is the tightest possible pairing between
+            // the MF timestamp and wall-clock time for the anchor measurement.
+            LARGE_INTEGER qpcFreq, qpcNow;
+            QueryPerformanceFrequency(&qpcFreq);
+            QueryPerformanceCounter(&qpcNow);
+            uint64_t qpcUs = (qpcNow.QuadPart * 1000000ULL) / static_cast<uint64_t>(qpcFreq.QuadPart);
 
             if (FAILED(hr)) {
                 spdlog::warn("Audio ReadSample failed: 0x{:08X}", static_cast<uint32_t>(hr));
@@ -436,18 +475,24 @@ private:
 
             if (!sample) continue;
 
-            // FIX: Track timestamps to detect stale audio
-            if (m_baseTimestamp == 0) {
-                m_baseTimestamp = deviceTimestamp;
-            }
-
-            // Skip old audio packets (timestamp went backwards)
+            // FIX: Skip backwards-going timestamps (device reset / flush artefact).
             if (deviceTimestamp < m_lastDeviceTimestamp && m_lastDeviceTimestamp > 0) {
-                spdlog::debug("Skipping old audio packet");
+                spdlog::debug("Skipping backwards audio timestamp");
                 sample->Release();
                 continue;
             }
             m_lastDeviceTimestamp = deviceTimestamp;
+
+            // FIX: Establish the QPC↔MF clock anchor on the very first live sample.
+            // We take QPC and the MF device timestamp at the same instant so that
+            // all subsequent timestamps can be derived purely from the MF clock,
+            // eliminating ReadSample scheduling jitter from the equation entirely.
+            if (!m_clockAnchored && deviceTimestamp > 0) {
+                m_anchorMfTime = deviceTimestamp;
+                m_anchorQpcUs = qpcUs;
+                m_clockAnchored = true;
+                spdlog::info("USB audio clock anchor set: MF={} QPC_us={}", deviceTimestamp, qpcUs);
+            }
 
             ComPtr<IMFMediaBuffer> buffer;
             hr = sample->ConvertToContiguousBuffer(&buffer);
@@ -466,12 +511,20 @@ private:
 
             USBAudioPacket packet;
             packet.data.assign(data, data + length);
-            
-            // Use high-precision QPC timestamp
-            LARGE_INTEGER qpcFreq, qpcNow;
-            QueryPerformanceFrequency(&qpcFreq);
-            QueryPerformanceCounter(&qpcNow);
-            packet.timestamp = (qpcNow.QuadPart * 1000000) / qpcFreq.QuadPart;
+
+            // FIX: Derive the timestamp from the MF device clock via the anchor.
+            //
+            // When the anchor is not yet set (deviceTimestamp == 0 on the very
+            // first sample from some devices), fall back to the just-captured QPC
+            // value so we never emit a zero timestamp.
+            if (m_clockAnchored && deviceTimestamp > 0) {
+                packet.timestamp = MfTimeToQpcUs(deviceTimestamp);
+            }
+            else {
+                // Fallback: use raw QPC for this sample only (anchor will be set
+                // on the next sample that carries a valid deviceTimestamp).
+                packet.timestamp = qpcUs;
+            }
 
             packet.sampleRate = m_sampleRate;
             packet.channels = m_channels;
@@ -497,32 +550,33 @@ private:
         spdlog::info("USB audio capture thread stopped");
     }
 
-    uint64_t GetCurrentTimestamp() const {
-        return std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::high_resolution_clock::now().time_since_epoch()
-        ).count();
-    }
+    // -----------------------------------------------------------------------
+    ComPtr<IMFMediaSource>    m_mediaSource;
+    ComPtr<IMFSourceReader>   m_sourceReader;
 
-    ComPtr<IMFMediaSource> m_mediaSource;
-    ComPtr<IMFSourceReader> m_sourceReader;
+    std::atomic<bool>         m_running;
+    std::thread               m_captureThread;
 
-    std::atomic<bool> m_running;
-    std::thread m_captureThread;
-
-    uint32_t m_sampleRate;
-    uint16_t m_channels;
-    uint16_t m_bitsPerSample;
-    uint32_t m_bufferSize;
+    uint32_t  m_sampleRate;
+    uint16_t  m_channels;
+    uint16_t  m_bitsPerSample;
+    uint32_t  m_bufferSize;
 
     bool m_comInitialized;
     bool m_mfInitialized;
 
-    // FIX: Timestamp tracking
-    LONGLONG m_baseTimestamp;
+    // --- A/V SYNC: QPC↔MF clock anchor ---
+    // Established once on the first live sample; never mutated afterwards.
+    LONGLONG m_anchorMfTime;      // MF device timestamp (100ns) at anchor instant
+    uint64_t m_anchorQpcUs;       // QPC microseconds at the same anchor instant
+    bool     m_clockAnchored;     // True once the anchor has been set
+
+    // Monotonicity guard
     LONGLONG m_lastDeviceTimestamp;
-    std::atomic<uint64_t> m_packetsProcessed;
+
+    std::atomic<uint64_t>     m_packetsProcessed;
 
     std::queue<USBAudioPacket> m_packetQueue;
-    std::mutex m_mutex;
-    std::condition_variable m_packetAvailable;
+    std::mutex                 m_mutex;
+    std::condition_variable    m_packetAvailable;
 };

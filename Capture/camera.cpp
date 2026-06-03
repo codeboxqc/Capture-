@@ -1,3 +1,4 @@
+#include <windows.h>
 #include "camera.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
@@ -96,7 +97,7 @@ bool CameraCapture::Initialize(const std::string& url, Microsoft::WRL::ComPtr<ID
     m_swsCtx = sws_getContext(
         m_codecCtx->width, m_codecCtx->height, m_codecCtx->pix_fmt,
         m_codecCtx->width, m_codecCtx->height, AV_PIX_FMT_BGRA,
-        SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        SWS_LANCZOS, nullptr, nullptr, nullptr);
 
     return true;
 }
@@ -208,8 +209,10 @@ void CameraCapture::CaptureLoop() {
                                 ReturnTexture(m_latestFrame.texture);
                             }
                             m_latestFrame.texture = d3dTexture;
-                            m_latestFrame.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
-                                std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+                            LARGE_INTEGER qpcFreq, qpcNow;
+                            QueryPerformanceFrequency(&qpcFreq);
+                            QueryPerformanceCounter(&qpcNow);
+                            m_latestFrame.timestamp = (qpcNow.QuadPart * 1000000) / qpcFreq.QuadPart;
                             m_hasNewFrame = true;
                         }
                     }

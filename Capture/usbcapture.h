@@ -99,18 +99,34 @@ public:
                     if (SUCCEEDED(activateArray[i]->ActivateObject(IID_PPV_ARGS(&source)))) {
                         ComPtr<IMFSourceReader> reader;
                         if (SUCCEEDED(MFCreateSourceReaderFromMediaSource(source.Get(), nullptr, &reader))) {
+                            // Find best resolution
+                            UINT32 bestWidth = 0, bestHeight = 0;
+                            UINT32 bestFps = 0;
+                            DWORD streamIndex = 0;
                             ComPtr<IMFMediaType> mediaType;
-                            if (SUCCEEDED(reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &mediaType))) {
+                            
+                            while (SUCCEEDED(reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, streamIndex, &mediaType))) {
                                 UINT32 width = 0, height = 0;
                                 MFGetAttributeSize(mediaType.Get(), MF_MT_FRAME_SIZE, &width, &height);
 
                                 UINT32 fpsNum = 0, fpsDen = 1;
                                 MFGetAttributeRatio(mediaType.Get(), MF_MT_FRAME_RATE, &fpsNum, &fpsDen);
-
-                                device.width = width;
-                                device.height = height;
-                                device.fps = (fpsDen > 0) ? (fpsNum / fpsDen) : 30;
+                                UINT32 fps = (fpsDen > 0) ? (fpsNum / fpsDen) : 0;
+                                
+                                if (width * height > bestWidth * bestHeight || 
+                                    (width * height == bestWidth * bestHeight && fps > bestFps)) {
+                                    bestWidth = width;
+                                    bestHeight = height;
+                                    bestFps = fps;
+                                }
+                                
+                                mediaType.Reset();
+                                streamIndex++;
                             }
+                            
+                            device.width = bestWidth;
+                            device.height = bestHeight;
+                            device.fps = bestFps > 0 ? bestFps : 30;
                         }
                         source->Shutdown();
                     }
@@ -230,33 +246,55 @@ public:
             return false;
         }
 
-        // Get native format info first
-        ComPtr<IMFMediaType> nativeType;
-        hr = m_sourceReader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &nativeType);
-        if (SUCCEEDED(hr)) {
-            GUID subtype;
-            nativeType->GetGUID(MF_MT_SUBTYPE, &subtype);
+        // Find best native format for recording quality
+        DWORD bestStreamIndex = 0;
+        UINT32 bestWidth = 0, bestHeight = 0;
+        UINT32 bestFps = 0;
+        DWORD streamIndex = 0;
+        ComPtr<IMFMediaType> testType;
+        
+        while (SUCCEEDED(m_sourceReader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, streamIndex, &testType))) {
+            UINT32 width = 0, height = 0;
+            MFGetAttributeSize(testType.Get(), MF_MT_FRAME_SIZE, &width, &height);
 
-            if (subtype == MFVideoFormat_YUY2) {
-                spdlog::info("Native format: YUY2");
+            UINT32 fpsNum = 0, fpsDen = 1;
+            MFGetAttributeRatio(testType.Get(), MF_MT_FRAME_RATE, &fpsNum, &fpsDen);
+            UINT32 fps = (fpsDen > 0) ? (fpsNum / fpsDen) : 0;
+            
+            // Prefer highest resolution, then highest framerate
+            if (width * height > bestWidth * bestHeight || 
+                (width * height == bestWidth * bestHeight && fps > bestFps)) {
+                bestWidth = width;
+                bestHeight = height;
+                bestFps = fps;
+                bestStreamIndex = streamIndex;
             }
-            else if (subtype == MFVideoFormat_NV12) {
-                spdlog::info("Native format: NV12");
-            }
-            else if (subtype == MFVideoFormat_RGB32) {
-                spdlog::info("Native format: RGB32");
-            }
-            else {
-                spdlog::info("Native format: Other");
+            
+            testType.Reset();
+            streamIndex++;
+        }
+        
+        if (bestWidth > 0 && bestHeight > 0) {
+            spdlog::info("Selecting best stream index {}: {}x{} @ {}fps", bestStreamIndex, bestWidth, bestHeight, bestFps);
+            
+            // Re-get the best type to configure
+            ComPtr<IMFMediaType> bestNativeType;
+            if (SUCCEEDED(m_sourceReader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, bestStreamIndex, &bestNativeType))) {
+                // Set the current media type to the best one we found first to configure resolution
+                m_sourceReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, bestNativeType.Get());
             }
         }
 
-        // Try to set RGB32 output format (MF will convert if possible)
+        // Try to set RGB32 output format (MF will convert if possible) while maintaining best resolution
         ComPtr<IMFMediaType> mediaType;
         hr = MFCreateMediaType(&mediaType);
         if (SUCCEEDED(hr)) {
             mediaType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
             mediaType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+            
+            if (bestWidth > 0 && bestHeight > 0) {
+                MFSetAttributeSize(mediaType.Get(), MF_MT_FRAME_SIZE, bestWidth, bestHeight);
+            }
 
             hr = m_sourceReader->SetCurrentMediaType(
                 MF_SOURCE_READER_FIRST_VIDEO_STREAM,
