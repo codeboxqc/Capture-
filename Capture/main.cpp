@@ -453,9 +453,29 @@ private:
         auto now = std::chrono::system_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_recordingStartTime).count();
 
-        int hours = static_cast<int>(elapsed / 3600);
-        int minutes = static_cast<int>((elapsed % 3600) / 60);
-        int seconds = static_cast<int>(elapsed % 60);
+        long long displayTime = elapsed;
+
+        // If duration based and duration is set
+        if (g_recordingMode == 0) {
+            long long totalDuration = (g_durationHours * 3600LL) + (g_durationMinutes * 60LL) + g_durationSeconds;
+            if (totalDuration > 0) {
+                // Countdown
+                displayTime = totalDuration - elapsed;
+                if (displayTime <= 0) {
+                    displayTime = 0;
+                    // Trigger stop when countdown reaches zero
+                    if (g_recording) {
+                        StopRecording();
+                        std::lock_guard<std::mutex> statusLock(g_statusMutex);
+                        g_statusMessage = "Ready";
+                    }
+                }
+            }
+        }
+
+        int hours = static_cast<int>(displayTime / 3600);
+        int minutes = static_cast<int>((displayTime % 3600) / 60);
+        int seconds = static_cast<int>(displayTime % 60);
 
         snprintf(g_currentTimerDisplay, sizeof(g_currentTimerDisplay), "%02d:%02d:%02d", hours, minutes, seconds);
     }
