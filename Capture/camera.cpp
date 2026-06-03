@@ -96,7 +96,7 @@ bool CameraCapture::Initialize(const std::string& url, Microsoft::WRL::ComPtr<ID
     m_swsCtx = sws_getContext(
         m_codecCtx->width, m_codecCtx->height, m_codecCtx->pix_fmt,
         m_codecCtx->width, m_codecCtx->height, AV_PIX_FMT_BGRA,
-        SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        SWS_LANCZOS, nullptr, nullptr, nullptr);
 
     return true;
 }
