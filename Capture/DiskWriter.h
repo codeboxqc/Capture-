@@ -14,7 +14,7 @@ extern "C" {
 }
 
 struct WriteTask {
-    std::vector<uint8_t> data;
+    std::shared_ptr<AVPacket> pkt;
     uint64_t timestamp;
     bool isVideo;
     int64_t pts;
@@ -262,7 +262,10 @@ public:
         if (!data || size == 0) return;
 
         WriteTask task;
-        task.data.assign(data, data + size);
+        AVPacket* pkt = av_packet_alloc();
+        av_new_packet(pkt, (int)size);
+        memcpy(pkt->data, data, size);
+        task.pkt = std::shared_ptr<AVPacket>(pkt, [](AVPacket* p) { av_packet_free(&p); });
         task.timestamp = timestamp;
         task.isVideo = false;
         task.keyframe = true;
@@ -309,21 +312,10 @@ private:
     }
 
     void WriteVideo(WriteTask& task) {
+        if (!task.pkt) return;
 
+        AVPacket* pkt = task.pkt.get();
 
-        AVPacket* pkt = av_packet_alloc();
-        if (!pkt) {
-            spdlog::error("Failed to allocate video packet");
-            return;
-        }
-
-        int ret = av_new_packet(pkt, (int)task.data.size());
-        if (ret < 0) {
-            av_packet_free(&pkt);
-            return;
-        }
-
-        memcpy(pkt->data, task.data.data(), task.data.size());
         pkt->stream_index = m_videoStream->index;
 
         // Calculate PTS in milliseconds from recording start, handling negative values safely
@@ -350,23 +342,13 @@ private:
             m_framesWritten++;
         }
 
-        av_packet_free(&pkt);
     }
 
     void WriteAudio(WriteTask& task) {
-        if (!m_audioStream) return;
+        if (!m_audioStream || !task.pkt) return;
 
+        AVPacket* pkt = task.pkt.get();
 
-        AVPacket* pkt = av_packet_alloc();
-        if (!pkt) return;
-
-        int ret = av_new_packet(pkt, (int)task.data.size());
-        if (ret < 0) {
-            av_packet_free(&pkt);
-            return;
-        }
-
-        memcpy(pkt->data, task.data.data(), task.data.size());
         pkt->stream_index = m_audioStream->index;
 
         // Calculate audio PTS from recording start, handling negative values safely
@@ -387,7 +369,7 @@ private:
         int bytesPerSample = (bitsPerSample > 0) ? (bitsPerSample / 8) : 4;
         int frameSize = channels * bytesPerSample;
         if (frameSize > 0) {
-            int numSamples = static_cast<int>(task.data.size()) / frameSize;
+            int numSamples = pkt->size / frameSize;
             // Scale duration based on audio stream timebase
             pkt->duration = av_rescale_q(numSamples, AVRational{1, m_audioStream->codecpar->sample_rate}, m_audioStream->time_base);
         }
@@ -398,7 +380,6 @@ private:
             m_audioPacketsWritten++;
         }
 
-        av_packet_free(&pkt);
     }
 
     AVFormatContext* m_formatContext;
