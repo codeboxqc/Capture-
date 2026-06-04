@@ -796,6 +796,19 @@ private:
                         OpenOutputFolder();
                     }
 
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    // === Mouse Cursor Options (Moved here per user request) ===
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("CURSOR OPTIONS");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
+                    ImGui::Checkbox("Show Mouse Cursor", &g_showMouseCursor);
+                    ImGui::Checkbox("Highlight Cursor (Yellow Circle)", &g_highlightCursor);
+                    ImGui::Checkbox("Show Click Animation", &g_showClickAnimation);
+
                     ImGui::EndTabItem();
                 }
 
@@ -894,21 +907,8 @@ private:
                     ImGui::EndTabItem();
                 }
 
-                /*
-                // --- TAB 3: MOUSE & CURSOR ---
+                // --- TAB 3: MOUSE & CURSOR (Advanced Settings) ---
                 if (ImGui::BeginTabItem("  Cursor  ")) {
-                    ImGui::Spacing();
-                    ImGui::Spacing();
-
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
-                    ImGui::Text("CURSOR OPTIONS");
-                    ImGui::PopStyleColor();
-                    ImGui::Spacing();
-
-                    ImGui::Checkbox("Show Mouse Cursor", &g_showMouseCursor);
-                    ImGui::Checkbox("Highlight Cursor (Yellow Circle)", &g_highlightCursor);
-                    ImGui::Checkbox("Show Click Animation", &g_showClickAnimation);
-
                     ImGui::Spacing();
                     ImGui::Spacing();
 
@@ -944,7 +944,6 @@ private:
 
                     ImGui::EndTabItem();
                 }
-                */
 
 
 
