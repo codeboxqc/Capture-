@@ -386,6 +386,30 @@ void SetupPipelineAndDraw(ComPtr<ID3D11DeviceContext> ctx, ComPtr<ID3D11Texture2
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
 
+    // Save state
+    ComPtr<ID3D11RenderTargetView> oldRTV;
+    ComPtr<ID3D11DepthStencilView> oldDSV;
+    ctx->OMGetRenderTargets(1, &oldRTV, &oldDSV);
+
+    D3D11_VIEWPORT oldVP;
+    UINT numVPs = 1;
+    ctx->RSGetViewports(&numVPs, &oldVP);
+
+    ComPtr<ID3D11VertexShader> oldVS;
+    ctx->VSGetShader(&oldVS, nullptr, nullptr);
+
+    ComPtr<ID3D11PixelShader> oldPS;
+    ctx->PSGetShader(&oldPS, nullptr, nullptr);
+
+    ComPtr<ID3D11BlendState> oldBlend;
+    float oldBlendFactor[4];
+    UINT oldSampleMask;
+    ctx->OMGetBlendState(&oldBlend, oldBlendFactor, &oldSampleMask);
+
+    D3D11_PRIMITIVE_TOPOLOGY oldTopology;
+    ctx->IAGetPrimitiveTopology(&oldTopology);
+
+    // Set new state
     ctx->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
     ctx->RSSetViewports(1, &vp);
 
@@ -403,9 +427,13 @@ void SetupPipelineAndDraw(ComPtr<ID3D11DeviceContext> ctx, ComPtr<ID3D11Texture2
 
     ctx->Draw(3, 0);
 
-    // Unbind
-    ID3D11RenderTargetView* nullRTV = nullptr;
-    ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
+    // Restore state
+    ctx->OMSetRenderTargets(1, oldRTV.GetAddressOf(), oldDSV.Get());
+    ctx->RSSetViewports(numVPs, &oldVP);
+    ctx->VSSetShader(oldVS.Get(), nullptr, 0);
+    ctx->PSSetShader(oldPS.Get(), nullptr, 0);
+    ctx->OMSetBlendState(oldBlend.Get(), oldBlendFactor, oldSampleMask);
+    ctx->IASetPrimitiveTopology(oldTopology);
 }
 
 bool MouseCapture::DrawCursorOnTexture(ID3D11Texture2D* targetTexture, int screenX, int screenY, int offsetX, int offsetY) {

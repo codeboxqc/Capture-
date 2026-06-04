@@ -948,10 +948,7 @@ private:
             return false;
         }
 
-        // === MOUSE CAPTURE DISABLED ===
-        // Cursor drawing is too slow for high-res recording (uses CPU staging)
-        // TODO: Implement GPU compute shader cursor compositing
-        /*
+        // === MOUSE CAPTURE INITIALIZATION ===
         if (settings.showMouseCursor) {
             m_mouseCapture = std::make_unique<MouseCapture>();
             if (!m_mouseCapture->Initialize(m_captureD3D11Device, m_captureD3D11Context)) {
@@ -961,7 +958,6 @@ private:
                 spdlog::info("MouseCapture initialized - cursor will be recorded");
             }
         }
-        */
 
         if (settings.captureAudio) {
             m_audioCapture = std::make_unique<AudioCapture>();
