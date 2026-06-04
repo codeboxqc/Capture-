@@ -4,6 +4,42 @@
 #include <string>
 #include <filesystem>
 
+// Get the user's Videos folder path
+std::string GetDefaultVideoFolderPath() {
+    PWSTR path = nullptr;
+    std::string result = "C:\\Recordings"; // Fallback
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Videos, 0, nullptr, &path))) {
+        std::filesystem::path fsPath(path);
+        
+        std::error_code ec;
+        if (!std::filesystem::exists(fsPath, ec)) {
+            std::filesystem::create_directories(fsPath, ec);
+        }
+        
+        result = fsPath.string();
+        CoTaskMemFree(path);
+    }
+    return result;
+}
+
+// Get the user's Pictures folder path
+std::string GetDefaultPicturesFolderPath() {
+    PWSTR path = nullptr;
+    std::string result = "C:\\Recordings"; // Fallback
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures, 0, nullptr, &path))) {
+        std::filesystem::path fsPath(path);
+        
+        std::error_code ec;
+        if (!std::filesystem::exists(fsPath, ec)) {
+            std::filesystem::create_directories(fsPath, ec);
+        }
+        
+        result = fsPath.string();
+        CoTaskMemFree(path);
+    }
+    return result;
+}
+
 // Get the user data folder path (LocalAppData/RecordingEngine) for Microsoft Store compatibility
 std::string GetUserDataFolderPath() {
     PWSTR path = nullptr;

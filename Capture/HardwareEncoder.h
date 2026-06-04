@@ -8,7 +8,7 @@ extern "C" {
 }
 
 struct EncodedPacket {
-    std::vector<uint8_t> data;
+    std::shared_ptr<AVPacket> pkt;
     int64_t pts;
     bool keyframe;
 };
@@ -298,9 +298,11 @@ public:
             }
 
             EncodedPacket ep;
-            ep.data.assign(m_packet->data, m_packet->data + m_packet->size);
-            ep.pts = m_packet->pts;
-            ep.keyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
+            AVPacket* moved_pkt = av_packet_alloc();
+            av_packet_move_ref(moved_pkt, m_packet);
+            ep.pkt = std::shared_ptr<AVPacket>(moved_pkt, [](AVPacket* p) { av_packet_free(&p); });
+            ep.pts = moved_pkt->pts;
+            ep.keyframe = (moved_pkt->flags & AV_PKT_FLAG_KEY) != 0;
 
             // Capture extradata if newly available from the encoder
             if (m_codecContext->extradata_size > 0 && m_codecContext->extradata) {
@@ -309,8 +311,6 @@ public:
 
             outPackets.push_back(std::move(ep));
             m_encodedFrames++;
-
-            av_packet_unref(m_packet);
         }
 
         m_frameCount++;
@@ -332,14 +332,14 @@ public:
             }
 
             EncodedPacket ep;
-            ep.data.assign(m_packet->data, m_packet->data + m_packet->size);
-            ep.pts = m_packet->pts;
-            ep.keyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
+            AVPacket* moved_pkt = av_packet_alloc();
+            av_packet_move_ref(moved_pkt, m_packet);
+            ep.pkt = std::shared_ptr<AVPacket>(moved_pkt, [](AVPacket* p) { av_packet_free(&p); });
+            ep.pts = moved_pkt->pts;
+            ep.keyframe = (moved_pkt->flags & AV_PKT_FLAG_KEY) != 0;
 
             outPackets.push_back(std::move(ep));
             m_encodedFrames++;
-
-            av_packet_unref(m_packet);
         }
 
         spdlog::info("Encoder flushed. Total frames: {}, Encoded packets: {}",

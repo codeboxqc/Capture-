@@ -40,7 +40,10 @@ bool g_showSettings = true;
 PerformanceMetrics g_metrics;
 std::string g_statusMessage = "Ready";
 std::mutex g_statusMutex;
-char g_outputPath[512] = "C:\\Recordings\\capture.hevc";
+// Forward declarations of utility functions
+std::string GetDefaultVideoFolderPath();
+std::string GetDefaultPicturesFolderPath();
+char g_outputPath[512] = ""; // Will be initialized in main()
 float g_ramBufferSizeGB = 4.0f;
 float g_bitrateMbps = 50.0f;
 
@@ -117,12 +120,28 @@ std::string WStringToString(const std::wstring& wstr) {
 
 // Open folder in Windows Explorer
 void OpenOutputFolder() {
-    std::filesystem::path outputPath(g_outputPath);
-    std::filesystem::path folderPath = outputPath.parent_path();
+    std::filesystem::path folderPath;
+    
+    // If the input box is empty or invalid, fallback to the default video folder
+    if (strlen(g_outputPath) == 0) {
+        folderPath = std::filesystem::path(GetDefaultVideoFolderPath());
+    } else {
+        std::filesystem::path outputPath(g_outputPath);
+        folderPath = outputPath.parent_path();
+        
+        // If the calculated parent path is empty, fallback to the default video folder
+        if (folderPath.empty()) {
+            folderPath = std::filesystem::path(GetDefaultVideoFolderPath());
+        }
+    }
 
     // Create folder if it doesn't exist
     if (!std::filesystem::exists(folderPath)) {
-        std::filesystem::create_directories(folderPath);
+        try {
+            std::filesystem::create_directories(folderPath);
+        } catch (...) {
+            // Ignore if creation fails
+        }
     }
 
     // Open folder in Explorer
@@ -1224,9 +1243,8 @@ ImGui::EndTabBar();
         g_settings.usbDeviceIndex = m_selectedUSBDevice;
         engine->UpdateSettings(g_settings);
 
-        std::string currentOutputPath = g_outputPath;
-        std::filesystem::path outputPath(currentOutputPath);
-        std::filesystem::path folderPath = outputPath.parent_path();
+        // Automatically use the Pictures folder for screenshots
+        std::filesystem::path folderPath(GetDefaultPicturesFolderPath());
 
         // Ensure folder exists
         if (!std::filesystem::exists(folderPath)) {
@@ -1472,5 +1490,9 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED); SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    // Initialize default output path to Windows Videos folder (Must be after CoInitialize)
+    std::string videoPath = GetDefaultVideoFolderPath() + "\\capture.hevc";
+    strcpy_s(g_outputPath, sizeof(g_outputPath), videoPath.c_str());
     RecordingApp app; int res = app.Run(hInstance, nCmdShow); CoUninitialize(); return res;
 }
