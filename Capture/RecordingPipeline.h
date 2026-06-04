@@ -1156,11 +1156,7 @@ private:
             if (!gotFrame || !frame.texture) continue;
 
             // === DRAW MOUSE CURSOR ON FRAME ===
-            // NOTE: Cursor drawing is currently disabled due to performance issues
-            // The staging texture approach is too slow for high-res/high-fps recording
-            // TODO: Implement GPU-based cursor compositing using compute shaders
-            /*
-            if (!m_isUSBCapture && m_settings.showMouseCursor && m_mouseCapture) {
+            if (m_settings.showMouseCursor && m_mouseCapture) {
                 // Get display offset for multi-monitor
                 int offsetX = 0, offsetY = 0;
                 if (m_displayManager) {
@@ -1169,36 +1165,41 @@ private:
                     offsetY = display.positionY;
                 }
 
-                // Draw cursor highlight if enabled (use colors from settings)
+                MouseState state = m_mouseCapture->GetMouseState();
+                auto now = std::chrono::steady_clock::now();
+
+                // Track click for 3-second glow color change
+                if (state.leftButton && !m_lastLeftButtonState) {
+                    m_clickAnimationStart = now;
+                    m_clickX = state.x;
+                    m_clickY = state.y;
+                    m_clickAnimationActive = true;
+                    m_lastClickTime = now; // For 3-second glow
+                }
+                m_lastLeftButtonState = state.leftButton;
+
+                // Draw cursor highlight if enabled
                 if (m_settings.highlightCursor) {
+                    // Check if within 3 seconds of last click
+                    float secondsSinceClick = std::chrono::duration<float>(now - m_lastClickTime).count();
+                    bool useClickGlowColor = (secondsSinceClick <= 3.0f);
+
+                    uint8_t glowR = useClickGlowColor ? m_settings.clickColorR : m_settings.highlightColorR;
+                    uint8_t glowG = useClickGlowColor ? m_settings.clickColorG : m_settings.highlightColorG;
+                    uint8_t glowB = useClickGlowColor ? m_settings.clickColorB : m_settings.highlightColorB;
+
                     m_mouseCapture->DrawCursorHighlight(
                         frame.texture.Get(), 0, 0, offsetX, offsetY,
                         m_settings.cursorHighlightRadius,
-                        m_settings.highlightColorR,
-                        m_settings.highlightColorG,
-                        m_settings.highlightColorB,
-                        m_settings.highlightColorA
+                        glowR, glowG, glowB, m_settings.highlightColorA
                     );
                 }
 
                 // Draw cursor
                 m_mouseCapture->DrawCursorOnTexture(frame.texture.Get(), 0, 0, offsetX, offsetY);
 
-                // Draw click animation if enabled (use colors from settings)
+                // Draw click animation if enabled
                 if (m_settings.showClickAnimation) {
-                    MouseState state = m_mouseCapture->GetMouseState();
-                    auto now = std::chrono::steady_clock::now();
-
-                    // Detect new click
-                    if (state.leftButton && !m_lastLeftButtonState) {
-                        m_clickAnimationStart = now;
-                        m_clickX = state.x;
-                        m_clickY = state.y;
-                        m_clickAnimationActive = true;
-                    }
-                    m_lastLeftButtonState = state.leftButton;
-
-                    // Draw animation if active
                     if (m_clickAnimationActive) {
                         float elapsed = std::chrono::duration<float>(now - m_clickAnimationStart).count();
                         float progress = elapsed / 0.3f;  // 300ms animation
@@ -1217,7 +1218,6 @@ private:
                     }
                 }
             }
-            */
 
             // Cross-adapter texture copy if needed
             ComPtr<ID3D11Texture2D> originalTexture = frame.texture;
@@ -1390,6 +1390,7 @@ private:
     bool m_lastLeftButtonState = false;
     bool m_clickAnimationActive = false;
     std::chrono::steady_clock::time_point m_clickAnimationStart;
+    std::chrono::steady_clock::time_point m_lastClickTime;
     int m_clickX = 0;
     int m_clickY = 0;
 

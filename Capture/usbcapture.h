@@ -664,8 +664,8 @@ private:
     }
 
     // Convert YUY2 to BGRA
-    void ConvertYUY2ToBGRA(const BYTE* yuy2Data, BYTE* bgraData, uint32_t width, uint32_t height) {
-        const uint32_t yuy2Stride = width * 2;
+    void ConvertYUY2ToBGRA(const BYTE* yuy2Data, BYTE* bgraData, uint32_t width, uint32_t height, LONG stride) {
+        const uint32_t yuy2Stride = stride > 0 ? stride : width * 2;
         const uint32_t bgraStride = width * 4;
 
         for (uint32_t y = 0; y < height; y++) {
@@ -708,14 +708,14 @@ private:
     }
 
     // Convert NV12 to BGRA
-    void ConvertNV12ToBGRA(const BYTE* nv12Data, BYTE* bgraData, uint32_t width, uint32_t height) {
+    void ConvertNV12ToBGRA(const BYTE* nv12Data, BYTE* bgraData, uint32_t width, uint32_t height, LONG stride) {
         const BYTE* yPlane = nv12Data;
-        const BYTE* uvPlane = nv12Data + (width * height);
+        const BYTE* uvPlane = nv12Data + (stride > 0 ? stride * height : width * height);
         const uint32_t bgraStride = width * 4;
 
         for (uint32_t y = 0; y < height; y++) {
-            const BYTE* yRow = yPlane + (y * width);
-            const BYTE* uvRow = uvPlane + ((y / 2) * width);
+            const BYTE* yRow = yPlane + (y * (stride > 0 ? stride : width));
+            const BYTE* uvRow = uvPlane + ((y / 2) * (stride > 0 ? stride : width));
             BYTE* bgraRow = bgraData + (y * bgraStride);
 
             for (uint32_t x = 0; x < width; x += 2) {
@@ -763,21 +763,32 @@ private:
         if (FAILED(hr)) return nullptr;
 
         BYTE* data = nullptr;
-        DWORD length = 0;
-        hr = buffer->Lock(&data, nullptr, &length);
+        LONG pitch = 0;
+
+        ComPtr<IMF2DBuffer> buffer2D;
+        bool is2D = SUCCEEDED(buffer.As(&buffer2D));
+
+        if (is2D) {
+            hr = buffer2D->Lock2D(&data, &pitch);
+        } else {
+            DWORD length = 0;
+            hr = buffer->Lock(&data, nullptr, &length);
+            // Default pitch based on input format
+            if (m_isNV12) pitch = m_width;
+            else if (m_isYUY2) pitch = m_width * 2;
+            else pitch = m_width * 4;
+
+            // Check length
+            DWORD expectedSize = m_width * m_height * m_bytesPerPixel;
+            if (m_isNV12) expectedSize = m_width * m_height * 3 / 2;
+            if (length < expectedSize) {
+                spdlog::warn("Buffer size mismatch: {} < {}", length, expectedSize);
+                buffer->Unlock();
+                return nullptr;
+            }
+        }
+
         if (FAILED(hr) || !data) return nullptr;
-
-        // Calculate expected size based on actual format
-        DWORD expectedSize = m_width * m_height * m_bytesPerPixel;
-        if (m_isNV12) {
-            expectedSize = m_width * m_height * 3 / 2;
-        }
-
-        if (length < expectedSize) {
-            spdlog::warn("Buffer size mismatch: {} < {} (format bpp={})", length, expectedSize, m_bytesPerPixel);
-            buffer->Unlock();
-            return nullptr;
-        }
 
         // Get or create D3D11 texture
         ComPtr<ID3D11Texture2D> texture;
@@ -804,12 +815,13 @@ private:
             desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
             desc.SampleDesc.Count = 1;
             desc.Usage = D3D11_USAGE_DEFAULT;
-            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 
             hr = m_d3d11Device->CreateTexture2D(&desc, nullptr, &texture);
             if (FAILED(hr)) {
                 spdlog::warn("CreateTexture2D failed: 0x{:08X}", static_cast<uint32_t>(hr));
-                buffer->Unlock();
+                if (is2D) buffer2D->Unlock2D();
+                else buffer->Unlock();
                 return nullptr;
             }
         }
@@ -817,19 +829,21 @@ private:
         // Convert and upload
         if (m_isYUY2) {
             std::vector<BYTE> bgraBuffer(m_width * m_height * 4);
-            ConvertYUY2ToBGRA(data, bgraBuffer.data(), m_width, m_height);
+            ConvertYUY2ToBGRA(data, bgraBuffer.data(), m_width, m_height, pitch);
             m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, bgraBuffer.data(), m_width * 4, 0);
         }
         else if (m_isNV12) {
             std::vector<BYTE> bgraBuffer(m_width * m_height * 4);
-            ConvertNV12ToBGRA(data, bgraBuffer.data(), m_width, m_height);
+            ConvertNV12ToBGRA(data, bgraBuffer.data(), m_width, m_height, pitch);
             m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, bgraBuffer.data(), m_width * 4, 0);
         }
         else {
-            m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, data, m_width * 4, 0);
+            m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, data, pitch > 0 ? pitch : m_width * 4, 0);
         }
 
-        buffer->Unlock();
+        if (is2D) buffer2D->Unlock2D();
+        else buffer->Unlock();
+
         return texture;
     }
 

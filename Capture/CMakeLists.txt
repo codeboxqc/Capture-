@@ -72,6 +72,7 @@ include_directories(
 
 # Add executable
 add_executable(RecordingEngine WIN32
+    mouse.cpp
     main.cpp
 )
 
@@ -85,6 +86,7 @@ target_link_libraries(RecordingEngine PRIVATE
     d3d11
     d3d12
     dxgi
+    d3dcompiler
     dxguid
     ole32
     oleaut32
