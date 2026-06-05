@@ -95,6 +95,25 @@ ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
 IDXGISwapChain* g_pSwapChain = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
+#define WM_TRAYICON (WM_USER + 1)
+NOTIFYICONDATAW g_nid = {};
+
+void AddTrayIcon(HWND hWnd) {
+    memset(&g_nid, 0, sizeof(g_nid));
+    g_nid.cbSize = sizeof(NOTIFYICONDATAW);
+    g_nid.hWnd = hWnd;
+    g_nid.uID = 1;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    lstrcpyW(g_nid.szTip, L"Recording Engine");
+    Shell_NotifyIconW(NIM_ADD, &g_nid);
+}
+
+void RemoveTrayIcon() {
+    Shell_NotifyIconW(NIM_DELETE, &g_nid);
+}
+
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 bool CreateDeviceD3D(HWND hWnd);
 void CleanupDeviceD3D();
@@ -211,6 +230,13 @@ void SetupModernDarkRedTheme() {
     // Borders
     colors[ImGuiCol_Border] = ImVec4(0.25f, 0.08f, 0.08f, 0.60f);
     colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+
+    // Style improvements (rounding)
+    style.WindowRounding = 6.0f;
+    style.FrameRounding = 4.0f;
+    style.PopupRounding = 4.0f;
+    style.GrabRounding = 4.0f;
+    style.TabRounding = 4.0f;
 
     // Text
     colors[ImGuiCol_Text] = textWhite;
@@ -364,6 +390,8 @@ public:
 
         // === NEW: Register Global Hotkeys ===
         g_mainHwnd = m_hWnd;
+        AddTrayIcon(m_hWnd);
+
         if (!RegisterHotKey(m_hWnd, HOTKEY_START_STOP, 0, VK_F9)) {
             spdlog::warn("Failed to register F9 hotkey for Start/Stop");
         }
@@ -647,6 +675,9 @@ private:
                         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.75f, 0.20f, 1.0f));
                         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.55f, 0.10f, 1.0f));
                         if (ImGui::Button("START RECORDING", buttonSize)) { StartRecording(); }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("* Start capturing the screen immediately.\n* Automatically minimizes the interface.\n* Shortcut: F9");
+                        }
                         ImGui::PopStyleColor(3);
                     }
                     else {
@@ -654,6 +685,9 @@ private:
                         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.25f, 0.25f, 1.0f));
                         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.65f, 0.10f, 0.10f, 1.0f));
                         if (ImGui::Button("STOP RECORDING", buttonSize)) { StopRecording(); }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("* Stop the current recording and save.\n* Shortcut: F9");
+                        }
                         ImGui::PopStyleColor(3);
                     }
 
@@ -665,6 +699,9 @@ private:
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.10f, 0.65f, 1.0f));
                     if (ImGui::Button("TAKE SCREENSHOT", ImVec2(180, 40))) {
                         TakeScreenshot();
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("* Take a high-quality screenshot.\n* Saved to output folder.\n* Shortcut: F10");
                     }
                     ImGui::PopStyleColor(3);
 
@@ -1436,6 +1473,7 @@ ImGui::EndTabBar();
     }
 
     void Cleanup() {
+        RemoveTrayIcon();
         {
             std::lock_guard<std::mutex> lock(g_engineMutex);
             if (g_engine) {
@@ -1485,6 +1523,12 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         else if (wParam == HOTKEY_SCREENSHOT) {
             g_hotkeyScreenshot = true;
+        }
+        return 0;
+    case WM_TRAYICON:
+        if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
+            ShowWindow(hWnd, SW_RESTORE);
+            SetForegroundWindow(hWnd);
         }
         return 0;
     }
