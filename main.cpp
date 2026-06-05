@@ -1253,6 +1253,21 @@ private:
                     if (ImGui::Button("Buy Me A Coffee", ImVec2(200, 40))) {
                         ShellExecuteA(nullptr, "open", "https://buymeacoffee.com/www.nutz.club", nullptr, nullptr, SW_SHOWNORMAL);
                     }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::BeginTooltip();
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
+                        ImGui::Text("  \xE2\x99\xA5 \xE2\x99\xA5   \xE2\x99\xA5 \xE2\x99\xA5  ");
+                        ImGui::Text("\xE2\x99\xA5     \xE2\x99\xA5     \xE2\x99\xA5");
+                        ImGui::Text("\xE2\x99\xA5  Thank You! \xE2\x99\xA5");
+                        ImGui::Text("  \xE2\x99\xA5         \xE2\x99\xA5  ");
+                        ImGui::Text("    \xE2\x99\xA5     \xE2\x99\xA5    ");
+                        ImGui::Text("      \xE2\x99\xA5 \xE2\x99\xA5      ");
+                        ImGui::Text("        \xE2\x99\xA5        ");
+                        ImGui::PopStyleColor();
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("power by jules");
+                        ImGui::EndTooltip();
+                    }
                     
                     ImGui::EndTabItem();
                 }
