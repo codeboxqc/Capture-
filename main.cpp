@@ -105,7 +105,7 @@ void AddTrayIcon(HWND hWnd) {
     g_nid.uID = 1;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
-    g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    g_nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(107)); // IDI_CAPTURE
     lstrcpyW(g_nid.szTip, L"Recording Engine");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
@@ -787,6 +787,7 @@ private:
                         if (ImGui::Button(g_scheduleActive ? "Deactivate" : "Activate", ImVec2(100, 0))) {
                             g_scheduleActive = !g_scheduleActive;
                         }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip(g_scheduleActive ? "* Turn off scheduled recording." : "* Turn on scheduled recording based on start/stop time.");
                     }
 
                     ImGui::Spacing();
@@ -805,6 +806,7 @@ private:
                     ImGui::Spacing();
 
                     ImGui::Checkbox("Enable Region Capture", &g_settings.captureRegion);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Restrict capture to a specific screen area.\n* Saves processing power.");
                     if (g_settings.captureRegion) {
                         ImGui::SameLine();
                         if (ImGui::Button("Select Region", ImVec2(120, 0))) {
@@ -832,6 +834,7 @@ private:
                     if (ImGui::Button("Open Folder", ImVec2(100, 0))) {
                         OpenOutputFolder();
                     }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Open the directory where recordings are saved.");
 
                     ImGui::Spacing();
                     ImGui::Spacing();
@@ -843,8 +846,11 @@ private:
                     ImGui::Spacing();
 
                     ImGui::Checkbox("Show Mouse Cursor", &g_showMouseCursor);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Capture the system mouse cursor in the recording.");
                     ImGui::Checkbox("Highlight Cursor (Yellow Circle)", &g_highlightCursor);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Draw a prominent circle around the cursor for presentations.");
                     ImGui::Checkbox("Show Click Animation", &g_showClickAnimation);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Animate cursor clicks to visually indicate mouse inputs.");
 
                     ImGui::EndTabItem();
                 }
@@ -870,6 +876,7 @@ private:
                         case 3: g_statusMessage = "Low: Smaller files, visible compression"; break;
                         }
                     }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Choose the visual quality of the output video.\n* Higher quality uses more storage space.");
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
                     ImGui::Text("Lossless recommended for screen recording");
                     ImGui::PopStyleColor();
@@ -917,6 +924,7 @@ private:
                     const char* frameRates[] = { "60 FPS", "120 FPS", "144 FPS", "240 FPS" };
                     ImGui::SetNextItemWidth(250);
                     ImGui::Combo("##FPS", &m_currentFps, frameRates, IM_ARRAYSIZE(frameRates));
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Sets the target recording frame rate.\n* Higher FPS creates smoother videos but uses more resources.");
 
                     ImGui::Spacing();
                     ImGui::Spacing();
@@ -929,6 +937,7 @@ private:
                     const char* codecs[] = { "H.264 (AVC)", "H.265 (HEVC)", "AV1" };
                     ImGui::SetNextItemWidth(250);
                     ImGui::Combo("##Codec", &m_currentCodec, codecs, IM_ARRAYSIZE(codecs));
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Select the video encoding format.\n* HEVC is recommended for most uses.\n* H.264 offers maximum compatibility.");
 
                     ImGui::Spacing();
                     ImGui::Spacing();
@@ -940,6 +949,7 @@ private:
                     ImGui::Spacing();
                     ImGui::SetNextItemWidth(300);
                     ImGui::SliderFloat("##RAMBuffer", &g_ramBufferSizeGB, 1.0f, 16.0f, "%.1f GB");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Allocate RAM to buffer frames before encoding.\n* Higher values prevent frame drops during spikes.\n* Requires sufficient system RAM.");
 
                     ImGui::EndTabItem();
                 }
