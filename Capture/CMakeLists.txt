@@ -111,3 +111,9 @@ add_custom_command(TARGET RecordingEngine POST_BUILD
         ${VCPKG_INSTALLED_PATH}/bin/swscale-*.dll
         ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/
 )
+# Hardware Expansion: LibUSB and V4L2 support
+find_package(libusb-1.0 QUIET)
+if(LIBUSB_FOUND)
+    add_definitions(-DUSE_LIBUSB)
+    target_link_libraries(RecordingEngine PRIVATE libusb-1.0)
+endif()

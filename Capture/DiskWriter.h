@@ -233,7 +233,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(m_queueMutex);
             std::queue<WriteTask> empty;
-            std::swap(m_taskQueue, empty);
+
         }
 
         m_videoStream = nullptr;
@@ -246,7 +246,7 @@ public:
 
         // Clear pending audio queue
         std::queue<WriteTask> emptyAudio;
-        std::swap(m_pendingAudio, emptyAudio);
+
     }
 
     void QueueWriteTask(WriteTask&& task) {

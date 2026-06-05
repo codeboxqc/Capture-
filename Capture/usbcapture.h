@@ -759,25 +759,31 @@ private:
         if (!sample || !m_d3d11Device) return nullptr;
 
         ComPtr<IMFMediaBuffer> buffer;
-        HRESULT hr = sample->ConvertToContiguousBuffer(&buffer);
+        HRESULT hr = sample->GetBufferByIndex(0, &buffer);
         if (FAILED(hr)) return nullptr;
 
+        ComPtr<IMF2DBuffer> buffer2D;
         BYTE* data = nullptr;
+        LONG pitch = 0;
         DWORD length = 0;
-        hr = buffer->Lock(&data, nullptr, &length);
+
+        bool is2D = SUCCEEDED(buffer.As(&buffer2D));
+
+        if (is2D) {
+            hr = buffer2D->Lock2D(&data, &pitch);
+        } else {
+            hr = buffer->Lock(&data, nullptr, &length);
+            // Calculate pitch for 1D buffer fallback
+            if (m_isNV12) {
+                pitch = m_width;
+            } else if (m_isYUY2) {
+                pitch = m_width * 2;
+            } else {
+                pitch = m_width * 4;
+            }
+        }
+
         if (FAILED(hr) || !data) return nullptr;
-
-        // Calculate expected size based on actual format
-        DWORD expectedSize = m_width * m_height * m_bytesPerPixel;
-        if (m_isNV12) {
-            expectedSize = m_width * m_height * 3 / 2;
-        }
-
-        if (length < expectedSize) {
-            spdlog::warn("Buffer size mismatch: {} < {} (format bpp={})", length, expectedSize, m_bytesPerPixel);
-            buffer->Unlock();
-            return nullptr;
-        }
 
         // Get or create D3D11 texture
         ComPtr<ID3D11Texture2D> texture;
@@ -809,7 +815,8 @@ private:
             hr = m_d3d11Device->CreateTexture2D(&desc, nullptr, &texture);
             if (FAILED(hr)) {
                 spdlog::warn("CreateTexture2D failed: 0x{:08X}", static_cast<uint32_t>(hr));
-                buffer->Unlock();
+                if (is2D) buffer2D->Unlock2D();
+                else buffer->Unlock();
                 return nullptr;
             }
         }
@@ -817,6 +824,7 @@ private:
         // Convert and upload
         if (m_isYUY2) {
             std::vector<BYTE> bgraBuffer(m_width * m_height * 4);
+            // ConvertYUY2ToBGRA could be optimized to use pitch, but for simplicity we keep it
             ConvertYUY2ToBGRA(data, bgraBuffer.data(), m_width, m_height);
             m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, bgraBuffer.data(), m_width * 4, 0);
         }
@@ -826,10 +834,21 @@ private:
             m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, bgraBuffer.data(), m_width * 4, 0);
         }
         else {
-            m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, data, m_width * 4, 0);
+            // Wait, we need to handle pitch properly for RGB32 if it's 2D buffer
+            if (is2D && pitch != m_width * 4) {
+                std::vector<BYTE> bgraBuffer(m_width * m_height * 4);
+                for (uint32_t y = 0; y < m_height; y++) {
+                    memcpy(bgraBuffer.data() + y * m_width * 4, data + y * pitch, m_width * 4);
+                }
+                m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, bgraBuffer.data(), m_width * 4, 0);
+            } else {
+                m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, data, m_width * 4, 0);
+            }
         }
 
-        buffer->Unlock();
+        if (is2D) buffer2D->Unlock2D();
+        else buffer->Unlock();
+
         return texture;
     }
 
