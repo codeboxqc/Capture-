@@ -1417,6 +1417,9 @@ ImGui::EndTabBar();
         if (engine->StartRecording(g_settings)) {
             g_recording = true;
             g_recordingStartTime = std::chrono::system_clock::now();
+            if (g_mainHwnd) {
+                ShowWindow(g_mainHwnd, SW_MINIMIZE);
+            }
         }
     }
 
