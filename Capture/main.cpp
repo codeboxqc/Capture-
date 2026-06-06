@@ -95,6 +95,25 @@ ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
 IDXGISwapChain* g_pSwapChain = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
+#define WM_TRAYICON (WM_USER + 1)
+NOTIFYICONDATAW g_nid = {};
+
+void AddTrayIcon(HWND hWnd) {
+    memset(&g_nid, 0, sizeof(g_nid));
+    g_nid.cbSize = sizeof(NOTIFYICONDATAW);
+    g_nid.hWnd = hWnd;
+    g_nid.uID = 1;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(107)); // IDI_CAPTURE
+    lstrcpyW(g_nid.szTip, L"Recording Engine");
+    Shell_NotifyIconW(NIM_ADD, &g_nid);
+}
+
+void RemoveTrayIcon() {
+    Shell_NotifyIconW(NIM_DELETE, &g_nid);
+}
+
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 bool CreateDeviceD3D(HWND hWnd);
 void CleanupDeviceD3D();
@@ -211,6 +230,13 @@ void SetupModernDarkRedTheme() {
     // Borders
     colors[ImGuiCol_Border] = ImVec4(0.25f, 0.08f, 0.08f, 0.60f);
     colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+
+    // Style improvements (rounding)
+    style.WindowRounding = 6.0f;
+    style.FrameRounding = 4.0f;
+    style.PopupRounding = 4.0f;
+    style.GrabRounding = 4.0f;
+    style.TabRounding = 4.0f;
 
     // Text
     colors[ImGuiCol_Text] = textWhite;
@@ -364,6 +390,8 @@ public:
 
         // === NEW: Register Global Hotkeys ===
         g_mainHwnd = m_hWnd;
+        AddTrayIcon(m_hWnd);
+
         if (!RegisterHotKey(m_hWnd, HOTKEY_START_STOP, 0, VK_F9)) {
             spdlog::warn("Failed to register F9 hotkey for Start/Stop");
         }
@@ -404,13 +432,13 @@ private:
     std::vector<std::string> m_displayNames;
     std::vector<std::string> m_usbDeviceNames;
 
-    VirtualDisplayManager m_displayManager;
+    VirtualDisplayManager m_displayManager; 
     HWND m_hWnd = nullptr;
 
     bool CreateMainWindow(HINSTANCE hInstance, int nCmdShow) {
         WNDCLASSEXW wc = { sizeof(WNDCLASSEXW), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, nullptr, nullptr, nullptr, L"RecordingEngine", nullptr };
         ::RegisterClassExW(&wc);
-        m_hWnd = ::CreateWindowW(wc.lpszClassName, L"GPU Recording Engine", WS_OVERLAPPEDWINDOW, 100, 100, 820, 620, nullptr, nullptr, wc.hInstance, nullptr);
+        m_hWnd = ::CreateWindowW(wc.lpszClassName, L"GPU Open Source Capture", WS_OVERLAPPEDWINDOW, 100, 100, 820, 666, nullptr, nullptr, wc.hInstance, nullptr);
         return m_hWnd != nullptr;
     }
 
@@ -582,7 +610,7 @@ private:
             // ============ MODERN HEADER ============
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
             ImGui::SetWindowFontScale(1.3f);
-            ImGui::Text("GPU RECORDING ENGINE");
+            ImGui::Text("OSC");
             ImGui::SetWindowFontScale(1.0f);
             ImGui::PopStyleColor();
 
@@ -608,7 +636,7 @@ private:
 
                     // Status Section
                     ImGui::PushStyleColor(ImGuiCol_Text, g_recording ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f) : ImVec4(0.3f, 0.9f, 0.3f, 1.0f));
-                    ImGui::Text(g_recording ? "● RECORDING" : "● READY");
+                    ImGui::Text(g_recording ? "RECORDING" : "READY");
                     ImGui::PopStyleColor();
 
                     ImGui::SameLine();
@@ -647,6 +675,9 @@ private:
                         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.75f, 0.20f, 1.0f));
                         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.55f, 0.10f, 1.0f));
                         if (ImGui::Button("START RECORDING", buttonSize)) { StartRecording(); }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("* Start capturing the screen immediately.\n* Automatically minimizes the interface.\n* Shortcut: F9");
+                        }
                         ImGui::PopStyleColor(3);
                     }
                     else {
@@ -654,6 +685,9 @@ private:
                         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.25f, 0.25f, 1.0f));
                         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.65f, 0.10f, 0.10f, 1.0f));
                         if (ImGui::Button("STOP RECORDING", buttonSize)) { StopRecording(); }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("* Stop the current recording and save.\n* Shortcut: F9");
+                        }
                         ImGui::PopStyleColor(3);
                     }
 
@@ -665,6 +699,9 @@ private:
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.10f, 0.65f, 1.0f));
                     if (ImGui::Button("TAKE SCREENSHOT", ImVec2(180, 40))) {
                         TakeScreenshot();
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("* Take a high-quality screenshot.\n* Saved to output folder.\n* Shortcut: F10");
                     }
                     ImGui::PopStyleColor(3);
 
@@ -750,6 +787,7 @@ private:
                         if (ImGui::Button(g_scheduleActive ? "Deactivate" : "Activate", ImVec2(100, 0))) {
                             g_scheduleActive = !g_scheduleActive;
                         }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip(g_scheduleActive ? "* Turn off scheduled recording." : "* Turn on scheduled recording based on start/stop time.");
                     }
 
                     ImGui::Spacing();
@@ -768,6 +806,7 @@ private:
                     ImGui::Spacing();
 
                     ImGui::Checkbox("Enable Region Capture", &g_settings.captureRegion);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Restrict capture to a specific screen area.\n* Saves processing power.");
                     if (g_settings.captureRegion) {
                         ImGui::SameLine();
                         if (ImGui::Button("Select Region", ImVec2(120, 0))) {
@@ -795,6 +834,23 @@ private:
                     if (ImGui::Button("Open Folder", ImVec2(100, 0))) {
                         OpenOutputFolder();
                     }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Open the directory where recordings are saved.");
+
+                    ImGui::Spacing();
+                    ImGui::Spacing();
+
+                    // === Mouse Cursor Options (Moved here per user request) ===
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("CURSOR OPTIONS");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+
+                    ImGui::Checkbox("Show Mouse Cursor", &g_showMouseCursor);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Capture the system mouse cursor in the recording.");
+                    ImGui::Checkbox("Highlight Cursor (Yellow Circle)", &g_highlightCursor);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Draw a prominent circle around the cursor for presentations.");
+                    ImGui::Checkbox("Show Click Animation", &g_showClickAnimation);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Animate cursor clicks to visually indicate mouse inputs.");
 
                     ImGui::EndTabItem();
                 }
@@ -820,6 +876,7 @@ private:
                         case 3: g_statusMessage = "Low: Smaller files, visible compression"; break;
                         }
                     }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Choose the visual quality of the output video.\n* Higher quality uses more storage space.");
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
                     ImGui::Text("Lossless recommended for screen recording");
                     ImGui::PopStyleColor();
@@ -867,6 +924,7 @@ private:
                     const char* frameRates[] = { "60 FPS", "120 FPS", "144 FPS", "240 FPS" };
                     ImGui::SetNextItemWidth(250);
                     ImGui::Combo("##FPS", &m_currentFps, frameRates, IM_ARRAYSIZE(frameRates));
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Sets the target recording frame rate.\n* Higher FPS creates smoother videos but uses more resources.");
 
                     ImGui::Spacing();
                     ImGui::Spacing();
@@ -879,6 +937,7 @@ private:
                     const char* codecs[] = { "H.264 (AVC)", "H.265 (HEVC)", "AV1" };
                     ImGui::SetNextItemWidth(250);
                     ImGui::Combo("##Codec", &m_currentCodec, codecs, IM_ARRAYSIZE(codecs));
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Select the video encoding format.\n* HEVC is recommended for most uses.\n* H.264 offers maximum compatibility.");
 
                     ImGui::Spacing();
                     ImGui::Spacing();
@@ -890,25 +949,13 @@ private:
                     ImGui::Spacing();
                     ImGui::SetNextItemWidth(300);
                     ImGui::SliderFloat("##RAMBuffer", &g_ramBufferSizeGB, 1.0f, 16.0f, "%.1f GB");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("* Allocate RAM to buffer frames before encoding.\n* Higher values prevent frame drops during spikes.\n* Requires sufficient system RAM.");
 
                     ImGui::EndTabItem();
                 }
 
-                /*
-                // --- TAB 3: MOUSE & CURSOR ---
+                // --- TAB 3: MOUSE & CURSOR (Advanced Settings) ---
                 if (ImGui::BeginTabItem("  Cursor  ")) {
-                    ImGui::Spacing();
-                    ImGui::Spacing();
-
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
-                    ImGui::Text("CURSOR OPTIONS");
-                    ImGui::PopStyleColor();
-                    ImGui::Spacing();
-
-                    ImGui::Checkbox("Show Mouse Cursor", &g_showMouseCursor);
-                    ImGui::Checkbox("Highlight Cursor (Yellow Circle)", &g_highlightCursor);
-                    ImGui::Checkbox("Show Click Animation", &g_showClickAnimation);
-
                     ImGui::Spacing();
                     ImGui::Spacing();
 
@@ -944,7 +991,6 @@ private:
 
                     ImGui::EndTabItem();
                 }
-                */
 
 
 
@@ -1207,6 +1253,21 @@ private:
                     if (ImGui::Button("Buy Me A Coffee", ImVec2(200, 40))) {
                         ShellExecuteA(nullptr, "open", "https://buymeacoffee.com/www.nutz.club", nullptr, nullptr, SW_SHOWNORMAL);
                     }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::BeginTooltip();
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
+                        ImGui::Text("  o o    o o   ");
+                        ImGui::Text("o      o     o  ");
+                        ImGui::Text("o            o ");
+                        ImGui::Text(" o          o ");
+                        ImGui::Text("   o       o   ");
+                        ImGui::Text("    o     o    "); 
+                        ImGui::Text("       o       ");
+                        ImGui::PopStyleColor();
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("    freeware   ");
+                        ImGui::EndTooltip();
+                    }
                     
                     ImGui::EndTabItem();
                 }
@@ -1418,6 +1479,9 @@ ImGui::EndTabBar();
         if (engine->StartRecording(g_settings)) {
             g_recording = true;
             g_recordingStartTime = std::chrono::system_clock::now();
+            if (g_mainHwnd) {
+                ShowWindow(g_mainHwnd, SW_MINIMIZE);
+            }
         }
     }
 
@@ -1434,6 +1498,7 @@ ImGui::EndTabBar();
     }
 
     void Cleanup() {
+        RemoveTrayIcon();
         {
             std::lock_guard<std::mutex> lock(g_engineMutex);
             if (g_engine) {
@@ -1483,6 +1548,12 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         else if (wParam == HOTKEY_SCREENSHOT) {
             g_hotkeyScreenshot = true;
+        }
+        return 0;
+    case WM_TRAYICON:
+        if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
+            ShowWindow(hWnd, SW_RESTORE);
+            SetForegroundWindow(hWnd);
         }
         return 0;
     }
