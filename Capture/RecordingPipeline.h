@@ -233,6 +233,32 @@ private:
         m_displayManager->SetActiveDisplay(m_settings.displayIndex);
         ComPtr<IDXGIOutput> output = m_displayManager->GetActiveDisplayOutput();
 
+        // Calculate region coordinates local to this display
+        bool cropEnabled = false;
+        int cropX = 0, cropY = 0, cropWidth = 0, cropHeight = 0;
+
+        size_t displayIdx = (m_settings.displayIndex < m_displayManager->GetDisplayCount()) ? m_settings.displayIndex : 0;
+        const auto& displayInfo = m_displayManager->GetDisplayInfo(displayIdx);
+
+        if (m_settings.captureRegion && m_settings.regionWidth > 0 && m_settings.regionHeight > 0) {
+            int localX = m_settings.regionX - displayInfo.positionX;
+            int localY = m_settings.regionY - displayInfo.positionY;
+
+            localX = std::max(0, localX);
+            localY = std::max(0, localY);
+
+            int tempCropWidth = std::min((int)displayInfo.width - localX, m_settings.regionWidth);
+            int tempCropHeight = std::min((int)displayInfo.height - localY, m_settings.regionHeight);
+
+            if (tempCropWidth > 0 && tempCropHeight > 0) {
+                cropX = localX;
+                cropY = localY;
+                cropWidth = tempCropWidth & ~1;
+                cropHeight = tempCropHeight & ~1;
+                cropEnabled = true;
+            }
+        }
+
         ComPtr<IDXGIAdapter> displayAdapter;
         if (output) {
             output->GetParent(IID_PPV_ARGS(&displayAdapter));
@@ -297,7 +323,7 @@ private:
                     }
 
                     if (gotAnyFrame && lastValidFrame.texture) {
-                        SaveTextureAsPngManual(device, context, lastValidFrame.texture, outputPath);
+                        SaveTextureAsPngManual(device, context, lastValidFrame.texture, outputPath, cropEnabled, cropX, cropY, cropWidth, cropHeight);
                         usb->ReturnTexture(lastValidFrame.texture);
                         success = true;
                     }
@@ -355,7 +381,7 @@ private:
                         }
 
                         if (gotAnyFrame && lastValidFrame.texture) {
-                            SaveTextureAsPngManual(captureDevice, captureContext, lastValidFrame.texture, outputPath);
+                            SaveTextureAsPngManual(captureDevice, captureContext, lastValidFrame.texture, outputPath, cropEnabled, cropX, cropY, cropWidth, cropHeight);
                             cap->ReturnTexture(lastValidFrame.texture);
                             success = true;
                         }
@@ -370,13 +396,14 @@ private:
 
     // Helper for CaptureSingleFrame to avoid dependency on pipeline state
     void SaveTextureAsPngManual(ComPtr<ID3D11Device> device, ComPtr<ID3D11DeviceContext> context,
-        ComPtr<ID3D11Texture2D> texture, const std::string& path) {
+        ComPtr<ID3D11Texture2D> texture, const std::string& path,
+        bool cropEnabled = false, int cropX = 0, int cropY = 0, int cropWidth = 0, int cropHeight = 0) {
         if (!texture) return;
         D3D11_TEXTURE2D_DESC desc;
         texture->GetDesc(&desc);
 
-        if (desc.Usage == D3D11_USAGE_STAGING && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) {
-            // Already a staging texture, map directly
+        if (!cropEnabled && desc.Usage == D3D11_USAGE_STAGING && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) {
+            // Already a staging texture, map directly (only if not cropping)
             D3D11_MAPPED_SUBRESOURCE mapped;
             if (SUCCEEDED(context->Map(texture.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
                 SaveRawRgbaToPng(reinterpret_cast<uint8_t*>(mapped.pData), desc.Width, desc.Height, mapped.RowPitch, path);
@@ -393,11 +420,28 @@ private:
         sDesc.MipLevels = 1;
         sDesc.ArraySize = 1;
 
+        if (cropEnabled && cropWidth > 0 && cropHeight > 0) {
+            sDesc.Width = cropWidth;
+            sDesc.Height = cropHeight;
+        }
+
         if (SUCCEEDED(device->CreateTexture2D(&sDesc, nullptr, &staging))) {
-            context->CopyResource(staging.Get(), texture.Get());
+            if (cropEnabled && cropWidth > 0 && cropHeight > 0) {
+                D3D11_BOX box;
+                box.left = cropX;
+                box.right = cropX + cropWidth;
+                box.top = cropY;
+                box.bottom = cropY + cropHeight;
+                box.front = 0;
+                box.back = 1;
+                context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture.Get(), 0, &box);
+            } else {
+                context->CopyResource(staging.Get(), texture.Get());
+            }
+
             D3D11_MAPPED_SUBRESOURCE mapped;
             if (SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-                SaveRawRgbaToPng(reinterpret_cast<uint8_t*>(mapped.pData), desc.Width, desc.Height, mapped.RowPitch, path);
+                SaveRawRgbaToPng(reinterpret_cast<uint8_t*>(mapped.pData), sDesc.Width, sDesc.Height, mapped.RowPitch, path);
                 context->Unmap(staging.Get(), 0);
             }
         }
@@ -409,8 +453,34 @@ private:
         D3D11_TEXTURE2D_DESC desc;
         texture->GetDesc(&desc);
 
-        if (desc.Usage == D3D11_USAGE_STAGING && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) {
-            // Already a staging texture, map directly
+        // Calculate region coordinates local to this display
+        bool cropEnabled = false;
+        int cropX = 0, cropY = 0, cropWidth = 0, cropHeight = 0;
+
+        size_t displayIdx = (m_settings.displayIndex < m_displayManager->GetDisplayCount()) ? m_settings.displayIndex : 0;
+        const auto& displayInfo = m_displayManager->GetDisplayInfo(displayIdx);
+
+        if (m_settings.captureRegion && m_settings.regionWidth > 0 && m_settings.regionHeight > 0) {
+            int localX = m_settings.regionX - displayInfo.positionX;
+            int localY = m_settings.regionY - displayInfo.positionY;
+
+            localX = std::max(0, localX);
+            localY = std::max(0, localY);
+
+            int tempCropWidth = std::min((int)displayInfo.width - localX, m_settings.regionWidth);
+            int tempCropHeight = std::min((int)displayInfo.height - localY, m_settings.regionHeight);
+
+            if (tempCropWidth > 0 && tempCropHeight > 0) {
+                cropX = localX;
+                cropY = localY;
+                cropWidth = tempCropWidth & ~1;
+                cropHeight = tempCropHeight & ~1;
+                cropEnabled = true;
+            }
+        }
+
+        if (!cropEnabled && desc.Usage == D3D11_USAGE_STAGING && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) {
+            // Already a staging texture, map directly (only if not cropping)
             D3D11_MAPPED_SUBRESOURCE mapped;
             if (SUCCEEDED(context->Map(texture.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
                 size_t dataSize = mapped.RowPitch * desc.Height;
@@ -434,13 +504,30 @@ private:
         stagingDesc.MipLevels = 1;
         stagingDesc.ArraySize = 1;
 
+        if (cropEnabled) {
+            stagingDesc.Width = cropWidth;
+            stagingDesc.Height = cropHeight;
+        }
+
         HRESULT hr = device->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture);
         if (FAILED(hr)) {
             spdlog::error("Failed to create staging texture for screenshot: 0x{:08X}", static_cast<uint32_t>(hr));
             return;
         }
 
-        context->CopyResource(stagingTexture.Get(), texture.Get());
+        if (cropEnabled) {
+            D3D11_BOX box;
+            box.left = cropX;
+            box.right = cropX + cropWidth;
+            box.top = cropY;
+            box.bottom = cropY + cropHeight;
+            box.front = 0;
+            box.back = 1;
+
+            context->CopySubresourceRegion(stagingTexture.Get(), 0, 0, 0, 0, texture.Get(), 0, &box);
+        } else {
+            context->CopyResource(stagingTexture.Get(), texture.Get());
+        }
 
         D3D11_MAPPED_SUBRESOURCE mapped;
         hr = context->Map(stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
@@ -450,14 +537,14 @@ private:
         }
 
         // Copy raw data for async processing
-        size_t dataSize = mapped.RowPitch * desc.Height;
+        size_t dataSize = mapped.RowPitch * stagingDesc.Height;
         auto buffer = std::make_shared<std::vector<uint8_t>>(dataSize);
         memcpy(buffer->data(), mapped.pData, dataSize);
 
         context->Unmap(stagingTexture.Get(), 0);
 
         // Run PNG encoding in a separate thread
-        std::thread([buffer, width = desc.Width, height = desc.Height, stride = mapped.RowPitch, path]() {
+        std::thread([buffer, width = stagingDesc.Width, height = stagingDesc.Height, stride = mapped.RowPitch, path]() {
             RecordingPipeline::SaveRawRgbaToPngStatic(buffer->data(), width, height, stride, path);
             }).detach();
     }
