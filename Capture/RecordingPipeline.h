@@ -224,7 +224,8 @@ private:
             spdlog::error("Screenshot: Failed to get GPU info by index {}, trying optimal", m_settings.gpuIndex);
             try {
                 m_gpuInfo = m_gpuDetector->GetOptimalGPU();
-            } catch (...) {
+            }
+            catch (...) {
                 spdlog::error("Screenshot: Failed to get optimal GPU");
                 return false;
             }
@@ -232,6 +233,32 @@ private:
 
         m_displayManager->SetActiveDisplay(m_settings.displayIndex);
         ComPtr<IDXGIOutput> output = m_displayManager->GetActiveDisplayOutput();
+
+        // Calculate region coordinates local to this display
+        bool cropEnabled = false;
+        int cropX = 0, cropY = 0, cropWidth = 0, cropHeight = 0;
+
+        size_t displayIdx = (m_settings.displayIndex < m_displayManager->GetDisplayCount()) ? m_settings.displayIndex : 0;
+        const auto& displayInfo = m_displayManager->GetDisplayInfo(displayIdx);
+
+        if (m_settings.captureRegion && m_settings.regionWidth > 0 && m_settings.regionHeight > 0) {
+            int localX = m_settings.regionX - displayInfo.positionX;
+            int localY = m_settings.regionY - displayInfo.positionY;
+
+            localX = std::max(0, localX);
+            localY = std::max(0, localY);
+
+            int tempCropWidth = std::min((int)displayInfo.width - localX, m_settings.regionWidth);
+            int tempCropHeight = std::min((int)displayInfo.height - localY, m_settings.regionHeight);
+
+            if (tempCropWidth > 0 && tempCropHeight > 0) {
+                cropX = localX;
+                cropY = localY;
+                cropWidth = tempCropWidth & ~1;
+                cropHeight = tempCropHeight & ~1;
+                cropEnabled = true;
+            }
+        }
 
         ComPtr<IDXGIAdapter> displayAdapter;
         if (output) {
@@ -297,7 +324,7 @@ private:
                     }
 
                     if (gotAnyFrame && lastValidFrame.texture) {
-                        SaveTextureAsPngManual(device, context, lastValidFrame.texture, outputPath);
+                        SaveTextureAsPngManual(device, context, lastValidFrame.texture, outputPath, cropEnabled, cropX, cropY, cropWidth, cropHeight);
                         usb->ReturnTexture(lastValidFrame.texture);
                         success = true;
                     }
@@ -323,7 +350,7 @@ private:
                     spdlog::info("Screenshot: Cross-adapter capture needed");
                     D3D11CreateDevice(displayAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
                         D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &captureDevice, nullptr, &captureContext);
-                    
+
                     ComPtr<ID3D10Multithread> capMultiThread;
                     if (SUCCEEDED(captureDevice.As(&capMultiThread))) {
                         capMultiThread->SetMultithreadProtected(TRUE);
@@ -355,7 +382,7 @@ private:
                         }
 
                         if (gotAnyFrame && lastValidFrame.texture) {
-                            SaveTextureAsPngManual(captureDevice, captureContext, lastValidFrame.texture, outputPath);
+                            SaveTextureAsPngManual(captureDevice, captureContext, lastValidFrame.texture, outputPath, cropEnabled, cropX, cropY, cropWidth, cropHeight);
                             cap->ReturnTexture(lastValidFrame.texture);
                             success = true;
                         }
@@ -370,13 +397,14 @@ private:
 
     // Helper for CaptureSingleFrame to avoid dependency on pipeline state
     void SaveTextureAsPngManual(ComPtr<ID3D11Device> device, ComPtr<ID3D11DeviceContext> context,
-        ComPtr<ID3D11Texture2D> texture, const std::string& path) {
+        ComPtr<ID3D11Texture2D> texture, const std::string& path,
+        bool cropEnabled = false, int cropX = 0, int cropY = 0, int cropWidth = 0, int cropHeight = 0) {
         if (!texture) return;
         D3D11_TEXTURE2D_DESC desc;
         texture->GetDesc(&desc);
 
-        if (desc.Usage == D3D11_USAGE_STAGING && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) {
-            // Already a staging texture, map directly
+        if (!cropEnabled && desc.Usage == D3D11_USAGE_STAGING && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) {
+            // Already a staging texture, map directly (only if not cropping)
             D3D11_MAPPED_SUBRESOURCE mapped;
             if (SUCCEEDED(context->Map(texture.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
                 SaveRawRgbaToPng(reinterpret_cast<uint8_t*>(mapped.pData), desc.Width, desc.Height, mapped.RowPitch, path);
@@ -393,11 +421,29 @@ private:
         sDesc.MipLevels = 1;
         sDesc.ArraySize = 1;
 
+        if (cropEnabled && cropWidth > 0 && cropHeight > 0) {
+            sDesc.Width = cropWidth;
+            sDesc.Height = cropHeight;
+        }
+
         if (SUCCEEDED(device->CreateTexture2D(&sDesc, nullptr, &staging))) {
-            context->CopyResource(staging.Get(), texture.Get());
+            if (cropEnabled && cropWidth > 0 && cropHeight > 0) {
+                D3D11_BOX box;
+                box.left = cropX;
+                box.right = cropX + cropWidth;
+                box.top = cropY;
+                box.bottom = cropY + cropHeight;
+                box.front = 0;
+                box.back = 1;
+                context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture.Get(), 0, &box);
+            }
+            else {
+                context->CopyResource(staging.Get(), texture.Get());
+            }
+
             D3D11_MAPPED_SUBRESOURCE mapped;
             if (SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-                SaveRawRgbaToPng(reinterpret_cast<uint8_t*>(mapped.pData), desc.Width, desc.Height, mapped.RowPitch, path);
+                SaveRawRgbaToPng(reinterpret_cast<uint8_t*>(mapped.pData), sDesc.Width, sDesc.Height, mapped.RowPitch, path);
                 context->Unmap(staging.Get(), 0);
             }
         }
@@ -409,8 +455,34 @@ private:
         D3D11_TEXTURE2D_DESC desc;
         texture->GetDesc(&desc);
 
-        if (desc.Usage == D3D11_USAGE_STAGING && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) {
-            // Already a staging texture, map directly
+        // Calculate region coordinates local to this display
+        bool cropEnabled = false;
+        int cropX = 0, cropY = 0, cropWidth = 0, cropHeight = 0;
+
+        size_t displayIdx = (m_settings.displayIndex < m_displayManager->GetDisplayCount()) ? m_settings.displayIndex : 0;
+        const auto& displayInfo = m_displayManager->GetDisplayInfo(displayIdx);
+
+        if (m_settings.captureRegion && m_settings.regionWidth > 0 && m_settings.regionHeight > 0) {
+            int localX = m_settings.regionX - displayInfo.positionX;
+            int localY = m_settings.regionY - displayInfo.positionY;
+
+            localX = std::max(0, localX);
+            localY = std::max(0, localY);
+
+            int tempCropWidth = std::min((int)displayInfo.width - localX, m_settings.regionWidth);
+            int tempCropHeight = std::min((int)displayInfo.height - localY, m_settings.regionHeight);
+
+            if (tempCropWidth > 0 && tempCropHeight > 0) {
+                cropX = localX;
+                cropY = localY;
+                cropWidth = tempCropWidth & ~1;
+                cropHeight = tempCropHeight & ~1;
+                cropEnabled = true;
+            }
+        }
+
+        if (!cropEnabled && desc.Usage == D3D11_USAGE_STAGING && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) {
+            // Already a staging texture, map directly (only if not cropping)
             D3D11_MAPPED_SUBRESOURCE mapped;
             if (SUCCEEDED(context->Map(texture.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
                 size_t dataSize = mapped.RowPitch * desc.Height;
@@ -434,13 +506,31 @@ private:
         stagingDesc.MipLevels = 1;
         stagingDesc.ArraySize = 1;
 
+        if (cropEnabled) {
+            stagingDesc.Width = cropWidth;
+            stagingDesc.Height = cropHeight;
+        }
+
         HRESULT hr = device->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture);
         if (FAILED(hr)) {
             spdlog::error("Failed to create staging texture for screenshot: 0x{:08X}", static_cast<uint32_t>(hr));
             return;
         }
 
-        context->CopyResource(stagingTexture.Get(), texture.Get());
+        if (cropEnabled) {
+            D3D11_BOX box;
+            box.left = cropX;
+            box.right = cropX + cropWidth;
+            box.top = cropY;
+            box.bottom = cropY + cropHeight;
+            box.front = 0;
+            box.back = 1;
+
+            context->CopySubresourceRegion(stagingTexture.Get(), 0, 0, 0, 0, texture.Get(), 0, &box);
+        }
+        else {
+            context->CopyResource(stagingTexture.Get(), texture.Get());
+        }
 
         D3D11_MAPPED_SUBRESOURCE mapped;
         hr = context->Map(stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
@@ -450,14 +540,14 @@ private:
         }
 
         // Copy raw data for async processing
-        size_t dataSize = mapped.RowPitch * desc.Height;
+        size_t dataSize = mapped.RowPitch * stagingDesc.Height;
         auto buffer = std::make_shared<std::vector<uint8_t>>(dataSize);
         memcpy(buffer->data(), mapped.pData, dataSize);
 
         context->Unmap(stagingTexture.Get(), 0);
 
         // Run PNG encoding in a separate thread
-        std::thread([buffer, width = desc.Width, height = desc.Height, stride = mapped.RowPitch, path]() {
+        std::thread([buffer, width = stagingDesc.Width, height = stagingDesc.Height, stride = mapped.RowPitch, path]() {
             RecordingPipeline::SaveRawRgbaToPngStatic(buffer->data(), width, height, stride, path);
             }).detach();
     }
@@ -575,7 +665,8 @@ private:
     bool StartCameraRecording(const RecordingSettings& settings) {
         try {
             m_gpuInfo = m_gpuDetector->GetGPUByIndex(settings.gpuIndex);
-        } catch (...) { return false; }
+        }
+        catch (...) { return false; }
 
         ComPtr<IDXGIFactory1> factory;
         CreateDXGIFactory1(IID_PPV_ARGS(&factory));
@@ -600,7 +691,7 @@ private:
 
         m_captureD3D11Device = m_sharedD3D11Device;
         m_captureD3D11Context = m_sharedD3D11Context;
-        
+
         m_settings.width = m_cameraCapture->GetWidth();
         m_settings.height = m_cameraCapture->GetHeight();
 
@@ -621,7 +712,7 @@ private:
         m_syncThread = std::thread(&RecordingPipeline::SyncLoop, this);
 
         if (!m_cameraCapture->Start()) { CleanupOnFailure(); return false; }
-        
+
         spdlog::info("Camera Recording started successfully");
         if (m_statusCallback) m_statusCallback("Camera Recording started");
         return true;
@@ -792,7 +883,7 @@ private:
             return false;
         }
 
-        
+
         m_displayManager->SetActiveDisplay(settings.displayIndex);
         ComPtr<IDXGIOutput> targetDisplayOutput = m_displayManager->GetActiveDisplayOutput();
 
@@ -829,15 +920,16 @@ private:
                 activeSettings.regionWidth = activeSettings.width;
                 activeSettings.regionHeight = activeSettings.height;
                 spdlog::info("Region capture enabled: {}x{} at {},{}", activeSettings.width, activeSettings.height, localX, localY);
-            } else {
+            }
+            else {
                 spdlog::warn("Region outside selected display, falling back to full screen.");
                 activeSettings.captureRegion = false;
             }
         }
 
 
-        
-        
+
+
         const auto& activeDisplay = m_displayManager->GetActiveDisplayInfo();
         if (activeSettings.width > 0 && activeSettings.height > 0) {
             m_settings.width = activeSettings.width;
@@ -954,7 +1046,8 @@ private:
             if (!m_mouseCapture->Initialize(m_captureD3D11Device, m_captureD3D11Context)) {
                 spdlog::warn("MouseCapture init failed, cursor will not be recorded");
                 m_mouseCapture.reset();
-            } else {
+            }
+            else {
                 spdlog::info("MouseCapture initialized - cursor will be recorded");
             }
         }
@@ -1141,7 +1234,7 @@ private:
                         m_screenshotRequested = false;
                     }
                 }
-                
+
                 if (shouldCaptureScreenshot) {
                     // FIX: Use capture device/context for screenshot since frame texture is on that adapter
                     SaveTextureAsPngAsync(m_captureD3D11Device, m_captureD3D11Context, frame.texture, m_screenshotPath);
@@ -1160,10 +1253,10 @@ private:
                     offsetX = display.positionX;
                     offsetY = display.positionY;
                 }
-                
+
                 MouseState state = m_mouseCapture->GetMouseState();
                 auto now = std::chrono::steady_clock::now();
-                
+
                 // Track click for 3-second glow color change
                 if (state.leftButton && !m_lastLeftButtonState) {
                     m_clickAnimationStart = now;
@@ -1179,11 +1272,11 @@ private:
                     // Check if within 3 seconds of last click
                     float secondsSinceClick = std::chrono::duration<float>(now - m_lastClickTime).count();
                     bool useClickGlowColor = (secondsSinceClick <= 3.0f);
-                    
+
                     uint8_t glowR = useClickGlowColor ? m_settings.clickColorR : m_settings.highlightColorR;
                     uint8_t glowG = useClickGlowColor ? m_settings.clickColorG : m_settings.highlightColorG;
                     uint8_t glowB = useClickGlowColor ? m_settings.clickColorB : m_settings.highlightColorB;
-                    
+
                     m_mouseCapture->DrawCursorHighlight(
                         frame.texture.Get(), 0, 0, offsetX, offsetY,
                         m_settings.cursorHighlightRadius,
@@ -1208,7 +1301,8 @@ private:
                                 m_settings.clickColorG,
                                 m_settings.clickColorB
                             );
-                        } else {
+                        }
+                        else {
                             m_clickAnimationActive = false;
                         }
                     }
@@ -1373,7 +1467,7 @@ private:
 
     std::atomic<bool> m_recording;
     std::atomic<uint32_t> m_droppedFrames;
-    std::atomic<uint64_t> m_cameraFrameCount{0};
+    std::atomic<uint64_t> m_cameraFrameCount{ 0 };
     bool m_isSameAdapter;
     bool m_isUSBCapture;
     bool m_isCameraCapture = false;

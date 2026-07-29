@@ -16,10 +16,10 @@ extern "C" {
 struct WriteTask {
     std::vector<uint8_t> data;
     std::shared_ptr<AVPacket> pkt;
-    uint64_t timestamp;
-    bool isVideo;
-    int64_t pts;
-    bool keyframe;
+    uint64_t timestamp=0;
+    bool isVide=0;
+    int64_t pts=0;
+    bool keyframe=0;
 };
 
 class DiskWriter {
