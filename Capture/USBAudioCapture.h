@@ -238,7 +238,7 @@ public:
         WCHAR* friendlyName = nullptr;
         UINT32 nameLen = 0;
         if (SUCCEEDED(ppDevices[deviceIndex]->GetAllocatedString(
-            MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &friendlyName, &nameLen))) {
+            MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &friendlyName, &nameLen)) && friendlyName) {
             int size = WideCharToMultiByte(CP_UTF8, 0, friendlyName, -1, nullptr, 0, nullptr, nullptr);
             if (size > 0) {
                 std::string name(size - 1, 0);

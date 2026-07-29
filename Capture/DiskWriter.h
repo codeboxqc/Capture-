@@ -17,7 +17,7 @@ struct WriteTask {
     std::vector<uint8_t> data;
     std::shared_ptr<AVPacket> pkt;
     uint64_t timestamp=0;
-    bool isVide=0;
+    bool isVideo=0;
     int64_t pts=0;
     bool keyframe=0;
 };

@@ -32,12 +32,20 @@
 #include <audiopolicy.h>
 #include <avrt.h>
 
+#pragma warning(push)
+#pragma warning(disable: 4996)  // fmt::v12::fstring deprecated
+#pragma warning(disable: 6294)  // fmt ill-defined for-loop
+#pragma warning(disable: 26495) // fmt uninitialized variable
+#pragma warning(disable: 26498) // fmt constexpr
+#pragma warning(disable: 26819) // nlohmann fallthrough
+#pragma warning(disable: 26800) // spdlog moved from object
 #include <spdlog/spdlog.h>
 #include <spdlog/async.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 
 #include <nlohmann/json.hpp>
+#pragma warning(pop)
 
 extern "C" {
 #include <libavcodec/avcodec.h>

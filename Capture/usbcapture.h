@@ -14,18 +14,18 @@
 // Simple USB Frame structure
 struct USBFrame {
     ComPtr<ID3D11Texture2D> texture;
-    uint64_t timestamp;
-    uint32_t frameIndex;
-    bool isKeyframe;
+    uint64_t timestamp = 0;
+    uint32_t frameIndex = 0;
+    bool isKeyframe = false;
 };
 
 // Simplified USB Capture Device Info
 struct USBCaptureDevice {
     std::string name;
-    int index;
-    uint32_t width;
-    uint32_t height;
-    uint32_t fps;
+    int index = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t fps = 0;
 };
 
 class SimpleUSBCapture {
@@ -92,11 +92,13 @@ public:
                     WCHAR* name = nullptr;
                     UINT32 nameLen = 0;
                     if (SUCCEEDED(activateArray[i]->GetAllocatedString(
-                        MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &nameLen))) {
+                        MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &nameLen)) && name) {
 
                         int size = WideCharToMultiByte(CP_UTF8, 0, name, -1, nullptr, 0, nullptr, nullptr);
-                        device.name.resize(size - 1);
-                        WideCharToMultiByte(CP_UTF8, 0, name, -1, &device.name[0], size, nullptr, nullptr);
+                        if (size > 0) {
+                            device.name.resize(size - 1);
+                            WideCharToMultiByte(CP_UTF8, 0, name, -1, &device.name[0], size, nullptr, nullptr);
+                        }
                         CoTaskMemFree(name);
                     }
 
@@ -211,12 +213,15 @@ public:
         hr = activateArray[deviceIndex]->ActivateObject(IID_PPV_ARGS(&m_mediaSource));
 
         WCHAR* deviceName = nullptr;
+        UINT32 nameLen = 0;
         if (SUCCEEDED(activateArray[deviceIndex]->GetAllocatedString(
-            MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &deviceName, nullptr))) {
+            MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &deviceName, &nameLen)) && deviceName) {
             int size = WideCharToMultiByte(CP_UTF8, 0, deviceName, -1, nullptr, 0, nullptr, nullptr);
-            std::string name(size - 1, 0);
-            WideCharToMultiByte(CP_UTF8, 0, deviceName, -1, &name[0], size, nullptr, nullptr);
-            spdlog::info("Opening USB device: {}", name);
+            if (size > 0) {
+                std::string name(size - 1, 0);
+                WideCharToMultiByte(CP_UTF8, 0, deviceName, -1, &name[0], size, nullptr, nullptr);
+                spdlog::info("Opening USB device: {}", name);
+            }
             CoTaskMemFree(deviceName);
         }
 
@@ -628,7 +633,7 @@ private:
                     
                     // If the delta is within 25% of expected, force it to be exactly expected
                     // This smooths out USB scheduling jitter that causes jerky video playback
-                    if (std::abs(diff - static_cast<int64_t>(expectedInterval)) < expectedInterval / 4) {
+                    if (std::abs(diff - static_cast<int64_t>(expectedInterval)) < static_cast<int64_t>(expectedInterval / 4)) {
                         frame.timestamp = m_lastValidTimestamp + expectedInterval;
                     }
                 }
