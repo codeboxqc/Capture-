@@ -1,0 +1,69 @@
+name: Build and Package Executable
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up MSVC Compiler
+      uses: ilammy/msvc-dev-cmd@v1
+
+    - name: Cache vcpkg Artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/vcpkg
+          C:/vcpkg/installed
+        key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json') }}
+        restore-keys: |
+          ${{ runner.os }}-vcpkg-
+
+    - name: Configure CMake
+      run: >
+        cmake -B build -S .
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+        -DVCPKG_TARGET_TRIPLET=x64-windows
+
+    - name: Build Project
+      run: cmake --build build --config Release --parallel
+
+    - name: Collect Executable and Dynamic Libraries (DLLs)
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path dist
+        
+        # Copy the compiled .exe
+        Copy-Item -Path "build/Release/*.exe" -Destination "dist/" -Force
+
+        # Copy all runtime DLLs resolved by vcpkg
+        if (Test-Path "build/Release/*.dll") {
+            Copy-Item -Path "build/Release/*.dll" -Destination "dist/" -Force
+        }
+
+        # Pull any additional DLLs generated in the vcpkg tree
+        Get-ChildItem -Path "build/vcpkg_installed/x64-windows/bin/*.dll" -Recurse | ForEach-Object {
+            Copy-Item -Path $_.FullName -Destination "dist/" -Force
+        }
+
+        # Create zip package
+        Compress-Archive -Path "dist/*" -DestinationPath "CaptureApp-Windows-x64.zip" -Force
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: CaptureApp-Windows-x64
+        path: CaptureApp-Windows-x64.zip
+        retention-days: 14
