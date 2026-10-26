@@ -4,31 +4,45 @@ project(CaptureApp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find Packages installed via vcpkg
+# Find vcpkg packages
 find_package(spdlog REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 
-# Use main.cpp (note: avoid compiling both main.cpp AND RecordingApp.cpp together 
-# if both define WinMain/main to prevent LNK2005 multiple definition errors)
-set(SOURCES
-    camera.cpp
-    mouse.cpp
-    main.cpp
-    region.cpp
-    util.cpp
+# GLOB all .cpp files recursively from the repository
+# This guarantees it finds camera.cpp whether it's in root, src/, OpenSourceCapture/, etc.
+file(GLOB_RECURSE PROJECT_SOURCES 
+    CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
 
-# Build a Windows GUI executable
-add_executable(${PROJECT_NAME} WIN32 ${SOURCES})
+# Filter out duplicate main files if both main.cpp and RecordingApp.cpp exist
+list(FILTER PROJECT_SOURCES EXCLUDE REGEX "RecordingApp\\.cpp$")
+# Exclude build output artifacts if re-run locally
+list(FILTER PROJECT_SOURCES EXCLUDE REGEX "/build/")
+list(FILTER PROJECT_SOURCES EXCLUDE REGEX "/vcpkg_installed/")
 
+# Find ImGui backend implementations provided by vcpkg
+find_path(IMGUI_INCLUDE_DIR "imgui.h")
+find_file(IMGUI_WIN32_SRC "imgui_impl_win32.cpp" PATHS "${IMGUI_INCLUDE_DIR}/backends" "${IMGUI_INCLUDE_DIR}" REQUIRED)
+find_file(IMGUI_DX11_SRC "imgui_impl_dx11.cpp" PATHS "${IMGUI_INCLUDE_DIR}/backends" "${IMGUI_INCLUDE_DIR}" REQUIRED)
+
+list(APPEND PROJECT_SOURCES ${IMGUI_WIN32_SRC} ${IMGUI_DX11_SRC})
+
+# Create executable
+add_executable(${PROJECT_NAME} WIN32 ${PROJECT_SOURCES})
+
+# Include all subdirectories where headers might reside
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/OpenSourceCapture
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${FFMPEG_INCLUDE_DIRS}
+    ${IMGUI_INCLUDE_DIR}
 )
 
-# Link Windows System APIs and Third-Party Libraries
+# Link all system and third-party libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE
     spdlog::spdlog
     nlohmann_json::nlohmann_json
