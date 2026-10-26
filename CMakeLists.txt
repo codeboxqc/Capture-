@@ -1,62 +1,51 @@
-cmake_minimum_required(VERSION 3.24)
-project(CaptureApp LANGUAGES CXX)
+void DetectAllDisplays() {
+        m_availableDisplays.clear();
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+        // Use DISPLAY_DEVICEW explicitly
+        DISPLAY_DEVICEW displayDevice;
+        ZeroMemory(&displayDevice, sizeof(displayDevice));
+        displayDevice.cb = sizeof(DISPLAY_DEVICEW);
 
-# Find packages installed via vcpkg
-find_package(spdlog REQUIRED)
-find_package(nlohmann_json REQUIRED)
-find_package(imgui CONFIG REQUIRED)
-find_package(FFMPEG REQUIRED)
+        for (UINT i = 0; EnumDisplayDevicesW(nullptr, i, &displayDevice, 0); i++) {
+            if (displayDevice.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) {
+                continue;
+            }
 
-# Recursively locate all project .cpp files
-file(GLOB_RECURSE PROJECT_SOURCES 
-    CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
-)
+            if (!(displayDevice.StateFlags & DISPLAY_DEVICE_ACTIVE)) {
+                continue;
+            }
 
-# Exclude duplicate entry points and build directories
-list(FILTER PROJECT_SOURCES EXCLUDE REGEX "RecordingApp\\.cpp$")
-list(FILTER PROJECT_SOURCES EXCLUDE REGEX "Capture\\.cpp$")
-list(FILTER PROJECT_SOURCES EXCLUDE REGEX "/build/")
-list(FILTER PROJECT_SOURCES EXCLUDE REGEX "/vcpkg_installed/")
-list(FILTER PROJECT_SOURCES EXCLUDE REGEX "/\\.")
+            DisplayInfo info;
+            info.displayName = displayDevice.DeviceName;
 
-# Create the Windows executable
-add_executable(${PROJECT_NAME} WIN32 ${PROJECT_SOURCES})
+            int size_needed = WideCharToMultiByte(CP_UTF8, 0, displayDevice.DeviceName,
+                (int)wcslen(displayDevice.DeviceName), nullptr, 0, nullptr, nullptr);
+            info.deviceName.resize(size_needed, 0);
+            WideCharToMultiByte(CP_UTF8, 0, displayDevice.DeviceName,
+                (int)wcslen(displayDevice.DeviceName), &info.deviceName[0], size_needed, nullptr, nullptr);
 
-# Include project directories and dependencies
-target_include_directories(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/OpenSourceCapture
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${FFMPEG_INCLUDE_DIRS}
-)
+            info.isPrimary = (displayDevice.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
 
-# Link all required libraries
-# Note: imgui::imgui already contains imgui_impl_win32 and imgui_impl_dx11 from vcpkg
-target_link_libraries(${PROJECT_NAME} PRIVATE
-    spdlog::spdlog
-    nlohmann_json::nlohmann_json
-    imgui::imgui
-    ${FFMPEG_LIBRARIES}
-    d3d11
-    d3d12
-    dxgi
-    d3dcompiler
-    ole32
-    avrt
-    winmm
-    setupapi
-    cfgmgr32
-    mf
-    mfplat
-    mfreadwrite
-    mfuuid
-    shlwapi
-)
+            DEVMODEW devMode;
+            ZeroMemory(&devMode, sizeof(devMode));
+            devMode.dmSize = sizeof(devMode);
 
-if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /MP /W3)
-endif()
+            if (EnumDisplaySettingsW(displayDevice.DeviceName, ENUM_CURRENT_SETTINGS, &devMode)) {
+                info.width = devMode.dmPelsWidth;
+                info.height = devMode.dmPelsHeight;
+                info.refreshRate = devMode.dmDisplayFrequency;
+                info.positionX = devMode.dmPosition.x;
+                info.positionY = devMode.dmPosition.y;
+            }
+
+            POINT pt = { info.positionX, info.positionY };
+            info.hMonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONULL);
+            if (!info.hMonitor) {
+                HWND hwnd = FindWindowW(nullptr, nullptr);
+                if (hwnd) {
+                    info.hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+                }
+            }
+
+            m_availableDisplays.push_back(info);
+        }
