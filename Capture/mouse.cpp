@@ -427,6 +427,10 @@ void SetupPipelineAndDraw(ComPtr<ID3D11DeviceContext> ctx, ComPtr<ID3D11Texture2
 
     ctx->Draw(3, 0);
 
+    // Unbind SRV slot 0 before restoring render targets to avoid D3D11 resource hazards
+    ID3D11ShaderResourceView* nullSRV[1] = { nullptr };
+    ctx->PSSetShaderResources(0, 1, nullSRV);
+
     // Restore state
     ctx->OMSetRenderTargets(1, oldRTV.GetAddressOf(), oldDSV.Get());
     ctx->RSSetViewports(numVPs, &oldVP);

@@ -143,6 +143,12 @@ public:
 
         spdlog::info("Stopping disk writer...");
         if (m_diskWriter) m_diskWriter->StopWriter();
+        if (m_mouseCapture) {
+            m_mouseCapture->Shutdown();
+            m_mouseCapture.reset();
+        }
+        m_crossAdapterEncodeTexture.Reset();
+        m_captureStagingTexture.Reset();
 
         // Reset sync variables for next recording
         m_recordingStartTime = 0;
@@ -683,6 +689,11 @@ private:
             &m_sharedD3D11Device, nullptr, &m_sharedD3D11Context);
         if (FAILED(hr)) return false;
 
+        ComPtr<ID3D10Multithread> multiThread;
+        if (SUCCEEDED(m_sharedD3D11Device.As(&multiThread))) {
+            multiThread->SetMultithreadProtected(TRUE);
+        }
+
         m_cameraCapture = std::make_unique<CameraCapture>();
         std::string url = settings.cameraUrl;
         if (!m_cameraCapture->Initialize(url, m_sharedD3D11Device)) {
@@ -705,11 +716,31 @@ private:
             CleanupOnFailure(); return false;
         }
 
+        if (settings.captureAudio) {
+            m_audioCapture = std::make_unique<AudioCapture>();
+            if (m_audioCapture->Initialize(settings.audioSampleRate, settings.audioBitDepth)) {
+                m_diskWriter->SetAudioFormat(
+                    m_audioCapture->GetSampleRate(),
+                    m_audioCapture->GetChannels(),
+                    m_audioCapture->GetBitDepth(),
+                    m_audioCapture->IsFloat()
+                );
+                if (!m_audioCapture->StartCapture()) {
+                    m_audioCapture.reset();
+                }
+            } else {
+                m_audioCapture.reset();
+            }
+        }
+
         if (!m_diskWriter->StartWriter()) { CleanupOnFailure(); return false; }
 
         m_recording = true;
         m_processThread = std::thread(&RecordingPipeline::ProcessLoop, this);
         m_syncThread = std::thread(&RecordingPipeline::SyncLoop, this);
+        if (m_audioCapture) {
+            m_audioThread = std::thread(&RecordingPipeline::AudioLoop, this);
+        }
 
         if (!m_cameraCapture->Start()) { CleanupOnFailure(); return false; }
 
@@ -817,7 +848,8 @@ private:
             m_diskWriter->SetAudioFormat(
                 m_usbAudioCapture->GetSampleRate(),
                 m_usbAudioCapture->GetChannels(),
-                m_usbAudioCapture->GetBitDepth()
+                m_usbAudioCapture->GetBitDepth(),
+                m_usbAudioCapture->GetBitDepth() == 32
             );
         }
 
@@ -1058,7 +1090,8 @@ private:
                 m_diskWriter->SetAudioFormat(
                     m_audioCapture->GetSampleRate(),
                     m_audioCapture->GetChannels(),
-                    m_audioCapture->GetBitDepth()
+                    m_audioCapture->GetBitDepth(),
+                    m_audioCapture->IsFloat()
                 );
 
                 if (!m_audioCapture->StartCapture()) {
@@ -1314,10 +1347,19 @@ private:
             if (!m_isSameAdapter && !m_isUSBCapture) {
                 // Allow all frames to be processed to maximize video quality
 
-                // Ensure we have a staging texture on the capture device
+                D3D11_TEXTURE2D_DESC srcTexDesc;
+                frame.texture->GetDesc(&srcTexDesc);
+
+                // Ensure we have a matching staging texture on the capture device
+                if (m_captureStagingTexture) {
+                    D3D11_TEXTURE2D_DESC stgDesc;
+                    m_captureStagingTexture->GetDesc(&stgDesc);
+                    if (stgDesc.Width != srcTexDesc.Width || stgDesc.Height != srcTexDesc.Height || stgDesc.Format != srcTexDesc.Format) {
+                        m_captureStagingTexture.Reset();
+                    }
+                }
                 if (!m_captureStagingTexture) {
-                    D3D11_TEXTURE2D_DESC desc;
-                    frame.texture->GetDesc(&desc);
+                    D3D11_TEXTURE2D_DESC desc = srcTexDesc;
                     desc.Usage = D3D11_USAGE_STAGING;
                     desc.BindFlags = 0;
                     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -1333,9 +1375,15 @@ private:
                     D3D11_MAPPED_SUBRESOURCE mapped;
                     HRESULT hr = m_captureD3D11Context->Map(m_captureStagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
                     if (SUCCEEDED(hr)) {
+                        if (m_crossAdapterEncodeTexture) {
+                            D3D11_TEXTURE2D_DESC encDesc;
+                            m_crossAdapterEncodeTexture->GetDesc(&encDesc);
+                            if (encDesc.Width != srcTexDesc.Width || encDesc.Height != srcTexDesc.Height || encDesc.Format != srcTexDesc.Format) {
+                                m_crossAdapterEncodeTexture.Reset();
+                            }
+                        }
                         if (!m_crossAdapterEncodeTexture) {
-                            D3D11_TEXTURE2D_DESC desc;
-                            frame.texture->GetDesc(&desc);
+                            D3D11_TEXTURE2D_DESC desc = srcTexDesc;
                             desc.Usage = D3D11_USAGE_DEFAULT;
                             desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
                             desc.CPUAccessFlags = 0;

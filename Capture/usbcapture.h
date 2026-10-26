@@ -14,18 +14,18 @@
 // Simple USB Frame structure
 struct USBFrame {
     ComPtr<ID3D11Texture2D> texture;
-    uint64_t timestamp;
-    uint32_t frameIndex;
-    bool isKeyframe;
+    uint64_t timestamp = 0;
+    uint32_t frameIndex = 0;
+    bool isKeyframe = false;
 };
 
 // Simplified USB Capture Device Info
 struct USBCaptureDevice {
     std::string name;
-    int index;
-    uint32_t width;
-    uint32_t height;
-    uint32_t fps;
+    int index = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t fps = 0;
 };
 
 class SimpleUSBCapture {
@@ -92,11 +92,13 @@ public:
                     WCHAR* name = nullptr;
                     UINT32 nameLen = 0;
                     if (SUCCEEDED(activateArray[i]->GetAllocatedString(
-                        MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &nameLen))) {
+                        MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &nameLen)) && name) {
 
                         int size = WideCharToMultiByte(CP_UTF8, 0, name, -1, nullptr, 0, nullptr, nullptr);
-                        device.name.resize(size - 1);
-                        WideCharToMultiByte(CP_UTF8, 0, name, -1, &device.name[0], size, nullptr, nullptr);
+                        if (size > 0) {
+                            device.name.resize(size - 1);
+                            WideCharToMultiByte(CP_UTF8, 0, name, -1, &device.name[0], size, nullptr, nullptr);
+                        }
                         CoTaskMemFree(name);
                     }
 
@@ -211,12 +213,15 @@ public:
         hr = activateArray[deviceIndex]->ActivateObject(IID_PPV_ARGS(&m_mediaSource));
 
         WCHAR* deviceName = nullptr;
+        UINT32 nameLen = 0;
         if (SUCCEEDED(activateArray[deviceIndex]->GetAllocatedString(
-            MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &deviceName, nullptr))) {
+            MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &deviceName, &nameLen)) && deviceName) {
             int size = WideCharToMultiByte(CP_UTF8, 0, deviceName, -1, nullptr, 0, nullptr, nullptr);
-            std::string name(size - 1, 0);
-            WideCharToMultiByte(CP_UTF8, 0, deviceName, -1, &name[0], size, nullptr, nullptr);
-            spdlog::info("Opening USB device: {}", name);
+            if (size > 0) {
+                std::string name(size - 1, 0);
+                WideCharToMultiByte(CP_UTF8, 0, deviceName, -1, &name[0], size, nullptr, nullptr);
+                spdlog::info("Opening USB device: {}", name);
+            }
             CoTaskMemFree(deviceName);
         }
 
@@ -413,10 +418,14 @@ public:
             m_captureThread.join();
         }
 
-        // Clear buffer
+        // Clear buffer and texture pool
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             while (!m_frameQueue.empty()) m_frameQueue.pop();
+        }
+        {
+            std::lock_guard<std::mutex> poolLock(m_poolMutex);
+            while (!m_texturePool.empty()) m_texturePool.pop();
         }
 
         spdlog::info("USB capture stopped. Total frames: {}", m_frameCount.load());
@@ -628,7 +637,7 @@ private:
                     
                     // If the delta is within 25% of expected, force it to be exactly expected
                     // This smooths out USB scheduling jitter that causes jerky video playback
-                    if (std::abs(diff - static_cast<int64_t>(expectedInterval)) < expectedInterval / 4) {
+                    if (std::abs(diff - static_cast<int64_t>(expectedInterval)) < static_cast<int64_t>(expectedInterval / 4)) {
                         frame.timestamp = m_lastValidTimestamp + expectedInterval;
                     }
                 }
@@ -663,13 +672,13 @@ private:
         spdlog::info("USB capture thread stopped. Frames captured: {}", m_frameCount.load());
     }
 
-    // Convert YUY2 to BGRA
-    void ConvertYUY2ToBGRA(const BYTE* yuy2Data, BYTE* bgraData, uint32_t width, uint32_t height) {
-        const uint32_t yuy2Stride = width * 2;
+    // Convert YUY2 to BGRA (respecting 2D surface pitch)
+    void ConvertYUY2ToBGRA(const BYTE* yuy2Data, BYTE* bgraData, uint32_t width, uint32_t height, LONG pitch = 0) {
+        const LONG yuy2Stride = (pitch != 0) ? pitch : static_cast<LONG>(width * 2);
         const uint32_t bgraStride = width * 4;
 
         for (uint32_t y = 0; y < height; y++) {
-            const BYTE* yuy2Row = yuy2Data + (y * yuy2Stride);
+            const BYTE* yuy2Row = yuy2Data + (static_cast<intptr_t>(y) * yuy2Stride);
             BYTE* bgraRow = bgraData + (y * bgraStride);
 
             for (uint32_t x = 0; x < width; x += 2) {
@@ -707,15 +716,16 @@ private:
         }
     }
 
-    // Convert NV12 to BGRA
-    void ConvertNV12ToBGRA(const BYTE* nv12Data, BYTE* bgraData, uint32_t width, uint32_t height) {
+    // Convert NV12 to BGRA (respecting 2D surface pitch)
+    void ConvertNV12ToBGRA(const BYTE* nv12Data, BYTE* bgraData, uint32_t width, uint32_t height, LONG pitch = 0) {
+        const LONG nv12Stride = (pitch > 0) ? pitch : static_cast<LONG>(width);
         const BYTE* yPlane = nv12Data;
-        const BYTE* uvPlane = nv12Data + (width * height);
+        const BYTE* uvPlane = nv12Data + (static_cast<size_t>(nv12Stride) * height);
         const uint32_t bgraStride = width * 4;
 
         for (uint32_t y = 0; y < height; y++) {
-            const BYTE* yRow = yPlane + (y * width);
-            const BYTE* uvRow = uvPlane + ((y / 2) * width);
+            const BYTE* yRow = yPlane + (static_cast<size_t>(y) * nv12Stride);
+            const BYTE* uvRow = uvPlane + (static_cast<size_t>(y / 2) * nv12Stride);
             BYTE* bgraRow = bgraData + (y * bgraStride);
 
             for (uint32_t x = 0; x < width; x += 2) {
@@ -824,13 +834,12 @@ private:
         // Convert and upload
         if (m_isYUY2) {
             std::vector<BYTE> bgraBuffer(m_width * m_height * 4);
-            // ConvertYUY2ToBGRA could be optimized to use pitch, but for simplicity we keep it 
-            ConvertYUY2ToBGRA(data, bgraBuffer.data(), m_width, m_height);
+            ConvertYUY2ToBGRA(data, bgraBuffer.data(), m_width, m_height, pitch);
             m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, bgraBuffer.data(), m_width * 4, 0);
         }
         else if (m_isNV12) {
             std::vector<BYTE> bgraBuffer(m_width * m_height * 4);
-            ConvertNV12ToBGRA(data, bgraBuffer.data(), m_width, m_height);
+            ConvertNV12ToBGRA(data, bgraBuffer.data(), m_width, m_height, pitch);
             m_d3d11Context->UpdateSubresource(texture.Get(), 0, nullptr, bgraBuffer.data(), m_width * 4, 0);
         }
         else {

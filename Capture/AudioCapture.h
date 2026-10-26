@@ -2,20 +2,33 @@
 #include "RecordingEngine.h"
 #include <mmdeviceapi.h>
 #include <audiopolicy.h>
-#include <ksmedia.h>  // FIX: Required for KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+#include <ksmedia.h>
 #include <queue>
 #include <mutex>
+#include <condition_variable>
+#include <vector>
+#include <cmath>
+#include <algorithm>
 
 struct AudioPacket {
     std::vector<BYTE> data;
-    uint64_t timestamp;
-    uint32_t sampleCount;
-    uint32_t bytesPerSample;
+    uint64_t timestamp = 0;
+    uint32_t sampleCount = 0;
+    uint32_t bytesPerSample = 0;
 };
 
 class AudioCapture {
 public:
-    AudioCapture() : m_running(false), m_sampleRate(0), m_bitDepth(0), m_channels(0), m_bytesPerSample(0) {}
+    AudioCapture()
+        : m_running(false)
+        , m_sampleRate(48000)
+        , m_bitDepth(32)
+        , m_channels(2)
+        , m_bytesPerSample(4)
+        , m_nativeChannels(2)
+        , m_isFloat(true)
+    {
+    }
 
     ~AudioCapture() {
         StopCapture();
@@ -23,7 +36,6 @@ public:
 
     bool Initialize(uint32_t requestedSampleRate, uint16_t requestedBitDepth) {
         HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        // FIX: Don't fail if COM already initialized (S_FALSE or RPC_E_CHANGED_MODE)
         if (FAILED(hr) && hr != S_FALSE && hr != RPC_E_CHANGED_MODE) {
             spdlog::error("COM initialization failed: 0x{:08X}", static_cast<uint32_t>(hr));
             return false;
@@ -35,87 +47,101 @@ public:
             return false;
         }
 
-        // Get default audio endpoint
-        hr = m_deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &m_device);
+        hr = m_deviceEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &m_device);
         if (FAILED(hr)) {
-            spdlog::error("Failed to get default audio endpoint: 0x{:08X}", static_cast<uint32_t>(hr));
-            return false;
+            hr = m_deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &m_device);
+            if (FAILED(hr)) {
+                spdlog::error("Failed to get default audio endpoint: 0x{:08X}", static_cast<uint32_t>(hr));
+                return false;
+            }
         }
 
-        // Activate audio client
-        hr = m_device->Activate(__uuidof(IAudioClient3), CLSCTX_ALL, nullptr, (void**)&m_audioClient);
+        // Activate Audio Client
+        hr = m_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&m_audioClient);
         if (FAILED(hr)) {
             spdlog::error("Failed to activate audio client: 0x{:08X}", static_cast<uint32_t>(hr));
             return false;
         }
 
-        // --- GET NATIVE WINDOWS FORMAT ---
-        // Instead of forcing 48000Hz, we politely ask Windows what it is currently using
         WAVEFORMATEX* mixFormat = nullptr;
-
         hr = m_audioClient->GetMixFormat(&mixFormat);
         if (FAILED(hr) || !mixFormat) {
             spdlog::error("Failed to get audio mix format");
             return false;
         }
 
-        // Ensure we are using 32-bit Float
-        if (mixFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-            WAVEFORMATEXTENSIBLE* wfex = (WAVEFORMATEXTENSIBLE*)mixFormat;
+        m_nativeChannels = mixFormat->nChannels;
+        m_sampleRate = mixFormat->nSamplesPerSec;
+        m_bitDepth = mixFormat->wBitsPerSample;
+        m_bytesPerSample = m_bitDepth / 8;
+
+        // Check if format is IEEE float
+        m_isFloat = false;
+        if (mixFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+            m_isFloat = true;
+        }
+        else if (mixFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+            WAVEFORMATEXTENSIBLE* wfex = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(mixFormat);
             if (IsEqualGUID(wfex->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
-                spdlog::info("WASAPI: Capturing in Perfect Quality (32-bit Float)");
+                m_isFloat = true;
             }
         }
 
-        // Save the real settings so the WAV file writes at the correct speed
-        m_sampleRate = mixFormat->nSamplesPerSec;
-        m_bitDepth = mixFormat->wBitsPerSample;
-        m_channels = mixFormat->nChannels;
-        m_bytesPerSample = m_bitDepth / 8;
+        // Always provide 2-channel stereo to the output pipeline
+        m_channels = 2;
+        REFERENCE_TIME bufferDuration = 20 * 10000; // 20ms buffer
 
-        REFERENCE_TIME bufferDuration = 10 * 10000; // 10ms
-
-        // Initialize using Windows' Native Format
+        // Primary: standard shared loopback
         hr = m_audioClient->Initialize(
             AUDCLNT_SHAREMODE_SHARED,
             AUDCLNT_STREAMFLAGS_LOOPBACK,
             bufferDuration,
             0,
             mixFormat,
-            nullptr);
+            nullptr
+        );
+
+        // Fallback: If initial call fails, re-activate client before retrying
+        if (FAILED(hr)) {
+            m_audioClient.Reset();
+            if (SUCCEEDED(m_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&m_audioClient))) {
+                hr = m_audioClient->Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                    bufferDuration,
+                    0,
+                    mixFormat,
+                    nullptr
+                );
+            }
+        }
 
         if (FAILED(hr)) {
-            uint32_t errCode = static_cast<uint32_t>(hr);
-            spdlog::error("Failed to initialize audio client: 0x{:08X}", errCode);
+            spdlog::error("Failed to initialize audio client: 0x{:08X}", static_cast<uint32_t>(hr));
             CoTaskMemFree(mixFormat);
             return false;
         }
 
         CoTaskMemFree(mixFormat);
-        mixFormat = nullptr;  // FIX: Avoid dangling pointer
 
-        // Get capture client
         hr = m_audioClient->GetService(__uuidof(IAudioCaptureClient), (void**)&m_captureClient);
         if (FAILED(hr)) {
             spdlog::error("Failed to get capture client: 0x{:08X}", static_cast<uint32_t>(hr));
             return false;
         }
 
-        spdlog::info("AudioCapture initialized: {}Hz / {}-bit / {} channels", m_sampleRate, m_bitDepth, m_channels);
+        spdlog::info("AudioCapture initialized: {}Hz / {}-bit / {}ch (Native {}ch, {})",
+            m_sampleRate, m_bitDepth, m_channels, m_nativeChannels, m_isFloat ? "Float" : "Int PCM");
         return true;
     }
 
-    // Getters for the WAV Header builder
     uint32_t GetSampleRate() const { return m_sampleRate; }
     uint16_t GetBitDepth() const { return m_bitDepth; }
     uint16_t GetChannels() const { return m_channels; }
+    bool IsFloat() const { return m_isFloat; }
 
     bool StartCapture() {
-        if (!m_audioClient) {
-            spdlog::error("Audio client not initialized");
-            return false;
-        }
-
+        if (!m_audioClient) return false;
         HRESULT hr = m_audioClient->Start();
         if (FAILED(hr)) {
             spdlog::error("Failed to start audio client: 0x{:08X}", static_cast<uint32_t>(hr));
@@ -129,23 +155,13 @@ public:
 
     void StopCapture() {
         m_running = false;
-        
-        // FIX: Wake up any waiting threads
         m_packetAvailable.notify_all();
-        
-        if (m_captureThread.joinable()) {
-            m_captureThread.join();
-        }
-        if (m_audioClient) {
-            m_audioClient->Stop();
-        }
-        
-        // FIX: Clear queue to free memory
-        {
-            std::lock_guard<std::mutex> lock(m_packetMutex);
-            std::queue<AudioPacket> empty;
-            std::swap(m_packetQueue, empty);
-        }
+        if (m_captureThread.joinable()) m_captureThread.join();
+        if (m_audioClient) m_audioClient->Stop();
+
+        std::lock_guard<std::mutex> lock(m_packetMutex);
+        std::queue<AudioPacket> empty;
+        std::swap(m_packetQueue, empty);
     }
 
     bool GetNextPacket(AudioPacket& packet, uint32_t timeoutMs = 100) {
@@ -160,87 +176,167 @@ public:
         }
 
         if (m_packetQueue.empty()) return false;
-
-        packet = std::move(m_packetQueue.front());  // FIX: Use move to avoid copy
+        packet = std::move(m_packetQueue.front());
         m_packetQueue.pop();
         return true;
     }
 
-    uint64_t GetTimestamp() const {
-        return std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+private:
+    void DownmixToStereo(const BYTE* src, BYTE* dst, UINT32 numFrames) {
+        if (m_isFloat && m_bytesPerSample == 4) {
+            const float* in = reinterpret_cast<const float*>(src);
+            float* out = reinterpret_cast<float*>(dst);
+
+            if (m_nativeChannels == 2) {
+                memcpy(dst, src, numFrames * 2 * sizeof(float));
+            }
+            else if (m_nativeChannels == 6) { // 5.1 Surround
+                for (UINT32 i = 0; i < numFrames; ++i) {
+                    float fl = in[i * 6 + 0];
+                    float fr = in[i * 6 + 1];
+                    float fc = in[i * 6 + 2];
+                    float lfe = in[i * 6 + 3];
+                    float bl = in[i * 6 + 4];
+                    float br = in[i * 6 + 5];
+
+                    out[i * 2 + 0] = std::clamp(fl + 0.707f * fc + 0.707f * bl + 0.5f * lfe, -1.0f, 1.0f);
+                    out[i * 2 + 1] = std::clamp(fr + 0.707f * fc + 0.707f * br + 0.5f * lfe, -1.0f, 1.0f);
+                }
+            }
+            else if (m_nativeChannels == 8) { // 7.1 Surround
+                for (UINT32 i = 0; i < numFrames; ++i) {
+                    float fl = in[i * 8 + 0];
+                    float fr = in[i * 8 + 1];
+                    float fc = in[i * 8 + 2];
+                    float lfe = in[i * 8 + 3];
+                    float bl = in[i * 8 + 4];
+                    float br = in[i * 8 + 5];
+                    float sl = in[i * 8 + 6];
+                    float sr = in[i * 8 + 7];
+
+                    out[i * 2 + 0] = std::clamp(fl + 0.707f * fc + 0.5f * (bl + sl) + 0.5f * lfe, -1.0f, 1.0f);
+                    out[i * 2 + 1] = std::clamp(fr + 0.707f * fc + 0.5f * (br + sr) + 0.5f * lfe, -1.0f, 1.0f);
+                }
+            }
+            else {
+                for (UINT32 i = 0; i < numFrames; ++i) {
+                    out[i * 2 + 0] = in[i * m_nativeChannels + 0];
+                    out[i * 2 + 1] = in[i * m_nativeChannels + 1];
+                }
+            }
+        }
+        else if (m_bytesPerSample == 2) { // 16-bit Integer PCM
+            const int16_t* in = reinterpret_cast<const int16_t*>(src);
+            int16_t* out = reinterpret_cast<int16_t*>(dst);
+
+            for (UINT32 i = 0; i < numFrames; ++i) {
+                out[i * 2 + 0] = in[i * m_nativeChannels + 0];
+                out[i * 2 + 1] = in[i * m_nativeChannels + 1];
+            }
+        }
+        else {
+            // Generic fallback
+            for (UINT32 i = 0; i < numFrames; ++i) {
+                memcpy(dst + i * 2 * m_bytesPerSample, src + i * m_nativeChannels * m_bytesPerSample, 2 * m_bytesPerSample);
+            }
+        }
     }
 
-private:
     void CaptureLoop() {
         spdlog::info("Audio capture thread started ({}Hz / {}-bit)", m_sampleRate, m_bitDepth);
 
-        // FIX: Pre-calculate frame size
-        const uint32_t frameSize = m_channels * m_bytesPerSample;
+        const uint32_t targetFrameSize = m_channels * m_bytesPerSample;
+        LARGE_INTEGER qpcFreq;
+        QueryPerformanceFrequency(&qpcFreq);
+        uint64_t lastPacketEndUs = 0;
 
         while (m_running) {
             UINT32 nextPacketSize = 0;
             HRESULT hr = m_captureClient->GetNextPacketSize(&nextPacketSize);
-            if (FAILED(hr)) {
-                spdlog::warn("GetNextPacketSize failed: 0x{:08X}", static_cast<uint32_t>(hr));
-                break;
+            if (FAILED(hr)) break;
+
+            if (nextPacketSize == 0) {
+                // Windows 11 idle state: sleep briefly and emit continuous silent frames if endpoint is idle >= 20ms
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                LARGE_INTEGER qpcNow;
+                QueryPerformanceCounter(&qpcNow);
+                uint64_t nowUs = (qpcNow.QuadPart * 1000000ULL) / qpcFreq.QuadPart;
+                if (lastPacketEndUs == 0) {
+                    lastPacketEndUs = nowUs;
+                } else if (nowUs >= lastPacketEndUs + 20000ULL) {
+                    UINT32 silentFrames = m_sampleRate / 50; // 20ms of silence
+                    AudioPacket silentPacket;
+                    silentPacket.timestamp = lastPacketEndUs;
+                    silentPacket.sampleCount = silentFrames;
+                    silentPacket.bytesPerSample = m_bytesPerSample;
+                    silentPacket.data.assign(static_cast<size_t>(silentFrames) * targetFrameSize, 0);
+                    lastPacketEndUs += (static_cast<uint64_t>(silentFrames) * 1000000ULL) / m_sampleRate;
+                    {
+                        std::lock_guard<std::mutex> lock(m_packetMutex);
+                        if (m_packetQueue.size() > 300) m_packetQueue.pop();
+                        m_packetQueue.push(std::move(silentPacket));
+                    }
+                    m_packetAvailable.notify_one();
+                }
+                continue;
             }
 
             while (nextPacketSize > 0 && m_running) {
                 BYTE* data = nullptr;
                 UINT32 numFramesAvailable = 0;
                 DWORD flags = 0;
-
                 UINT64 devPos = 0, qpcPos = 0;
+
                 hr = m_captureClient->GetBuffer(&data, &numFramesAvailable, &flags, &devPos, &qpcPos);
 
                 if (SUCCEEDED(hr)) {
                     AudioPacket packet;
-                    
-                    // Use QPC timestamp for high-precision A/V sync
-                    LARGE_INTEGER qpcFreq;
-                    QueryPerformanceFrequency(&qpcFreq);
-                    packet.timestamp = (qpcPos * 1000000) / qpcFreq.QuadPart;
+
+                    LARGE_INTEGER qpcNow;
+                    QueryPerformanceCounter(&qpcNow);
+                    uint64_t nowUs = (qpcNow.QuadPart * 1000000ULL) / qpcFreq.QuadPart;
+                    uint64_t durationUs = (static_cast<uint64_t>(numFramesAvailable) * 1000000ULL) / m_sampleRate;
+                    if (lastPacketEndUs > 0 && nowUs < lastPacketEndUs + durationUs && lastPacketEndUs <= nowUs + 50000ULL) {
+                        packet.timestamp = lastPacketEndUs;
+                    } else {
+                        packet.timestamp = (nowUs > durationUs) ? (nowUs - durationUs) : nowUs;
+                    }
+                    lastPacketEndUs = packet.timestamp + durationUs;
 
                     packet.sampleCount = numFramesAvailable;
                     packet.bytesPerSample = m_bytesPerSample;
 
-                    size_t dataSize = static_cast<size_t>(numFramesAvailable) * frameSize;
-                    packet.data.resize(dataSize);
+                    size_t outputDataSize = static_cast<size_t>(numFramesAvailable) * targetFrameSize;
+                    packet.data.resize(outputDataSize);
 
-                    // Handle silent frames correctly (like when nothing is playing)
                     if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                        memset(packet.data.data(), 0, dataSize);
+                        memset(packet.data.data(), 0, outputDataSize);
                     }
-                    else if (data) {  // FIX: Check data pointer before copying
-                        memcpy(packet.data.data(), data, dataSize);
+                    else if (data) {
+                        DownmixToStereo(data, packet.data.data(), numFramesAvailable);
                     }
 
                     {
                         std::lock_guard<std::mutex> lock(m_packetMutex);
-                        // FIX: Increased queue limit for high sample rates
-                        if (m_packetQueue.size() > 200) {
-                            m_packetQueue.pop(); // Keep max ~2 seconds of audio in queue
-                        }
-                        m_packetQueue.push(std::move(packet));  // FIX: Use move
+                        if (m_packetQueue.size() > 300) m_packetQueue.pop();
+                        m_packetQueue.push(std::move(packet));
                     }
 
                     m_packetAvailable.notify_one();
-                    hr = m_captureClient->ReleaseBuffer(numFramesAvailable);
+                    m_captureClient->ReleaseBuffer(numFramesAvailable);
                 }
 
                 if (FAILED(hr)) break;
                 hr = m_captureClient->GetNextPacketSize(&nextPacketSize);
                 if (FAILED(hr)) break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         spdlog::info("Audio capture thread stopped");
     }
 
     ComPtr<IMMDeviceEnumerator> m_deviceEnumerator;
     ComPtr<IMMDevice> m_device;
-    ComPtr<IAudioClient3> m_audioClient;
+    ComPtr<IAudioClient> m_audioClient;
     ComPtr<IAudioCaptureClient> m_captureClient;
 
     std::atomic<bool> m_running;
@@ -250,6 +346,8 @@ private:
     uint16_t m_bitDepth;
     uint16_t m_bytesPerSample;
     uint16_t m_channels;
+    uint16_t m_nativeChannels;
+    bool m_isFloat;
 
     std::queue<AudioPacket> m_packetQueue;
     std::mutex m_packetMutex;

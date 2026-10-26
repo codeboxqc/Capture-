@@ -122,6 +122,10 @@ public:
         m_codecContext->gop_size = static_cast<int>(settings.fps);
         m_codecContext->max_b_frames = 0;
         m_codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        m_codecContext->colorspace = AVCOL_SPC_BT709;
+        m_codecContext->color_primaries = AVCOL_PRI_BT709;
+        m_codecContext->color_trc = AVCOL_TRC_BT709;
+        m_codecContext->color_range = AVCOL_RANGE_MPEG;
         m_keyframeInterval = m_codecContext->gop_size;
 
         // Force AV1 to use global headers if possible
@@ -178,8 +182,12 @@ public:
         }
 
         if (tryingSaferDefaults) {
-            av_opt_set(m_codecContext->priv_data, "profile", "high", 0);
-            av_opt_set(m_codecContext->priv_data, "preset", "medium", 0);
+            const char* safeProfile = (m_codecContext->codec_id == AV_CODEC_ID_H264) ? "high" : "main";
+            av_opt_set(m_codecContext->priv_data, "profile", safeProfile, 0);
+            av_opt_set(m_codecContext->priv_data, "preset", "p4", 0);
+            av_opt_set(m_codecContext->priv_data, "tune", "hq", 0);
+            av_opt_set(m_codecContext->priv_data, "rc", "constqp", 0);
+            av_opt_set_int(m_codecContext->priv_data, "qp", targetQuality == 0 ? 1 : targetQuality, 0);
         }
 
         int ret = avcodec_open2(m_codecContext, codec, nullptr);
@@ -495,6 +503,9 @@ private:
             return false;
         }
 
+        const int* coeffs = sws_getCoefficients(SWS_CS_ITU709);
+        sws_setColorspaceDetails(m_swsContext, coeffs, 1, coeffs, 0, 0, 1 << 16, 1 << 16);
+
         // Intel QSV still benefits from hardware device context
         if (gpuInfo.encoderType == EncoderType::INTEL_QSV) {
             m_hwDeviceCtx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
@@ -529,25 +540,25 @@ private:
             // "p7" is the slowest/highest quality preset for NVENC
             ret |= av_opt_set(m_codecContext->priv_data, "preset", "p7", 0);
 
-            // FIX: tune=lossless ONLY works with rc=lossless (QP=0)
-            // For other quality levels, use tune=hq
-            if (targetQuality == 0) {
+            // FIX: tune=lossless ONLY works with rc=lossless (QP=0) on H264/HEVC (not AV1)
+            if (targetQuality == 0 && m_codecContext->codec_id != AV_CODEC_ID_AV1) {
                 ret |= av_opt_set(m_codecContext->priv_data, "tune", "lossless", 0);
                 ret |= av_opt_set(m_codecContext->priv_data, "rc", "lossless", 0);
                 spdlog::info("NVENC: Lossless mode enabled");
             }
             else {
+                int effectiveQp = (targetQuality == 0 && m_codecContext->codec_id == AV_CODEC_ID_AV1) ? 1 : targetQuality;
                 ret |= av_opt_set(m_codecContext->priv_data, "tune", "hq", 0);
                 ret |= av_opt_set(m_codecContext->priv_data, "rc", "constqp", 0);
-                ret |= av_opt_set_int(m_codecContext->priv_data, "qp", targetQuality, 0);
-                spdlog::info("NVENC: CQP mode with QP={}", targetQuality);
+                ret |= av_opt_set_int(m_codecContext->priv_data, "qp", effectiveQp, 0);
+                spdlog::info("NVENC: CQP mode with QP={}", effectiveQp);
             }
 
             ret |= av_opt_set(m_codecContext->priv_data, "delay", "0", 0);
             ret |= av_opt_set(m_codecContext->priv_data, "zerolatency", "1", 0);
 
-            // Profile: 4:4:4 for lossless, standard for others
-            if (targetQuality == 0) {
+            // Profile: 4:4:4 for lossless H264/HEVC, main/high for AV1 and non-lossless
+            if (targetQuality == 0 && m_codecContext->codec_id != AV_CODEC_ID_AV1) {
                 const char* profile = (m_codecContext->codec_id == AV_CODEC_ID_HEVC) ? "rext" : "high444p";
                 if (av_opt_set(m_codecContext->priv_data, "profile", profile, 0) < 0) {
                     spdlog::warn("NVIDIA 4:4:4 profile '{}' not supported", profile);
@@ -557,7 +568,7 @@ private:
                 }
             }
             else {
-                const char* profile = (m_codecContext->codec_id == AV_CODEC_ID_HEVC) ? "main" : "high";
+                const char* profile = (m_codecContext->codec_id == AV_CODEC_ID_H264) ? "high" : "main";
                 av_opt_set(m_codecContext->priv_data, "profile", profile, 0);
             }
 

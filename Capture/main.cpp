@@ -481,7 +481,7 @@ private:
             if (displayInfo.isPrimary) displayName += " [Primary]";
             m_displayNames.push_back(displayName);
         }
-        if (!m_displayList.empty()) m_selectedDisplay = m_displayManager.GetPrimaryDisplayIndex();
+        if (!m_displayList.empty()) m_selectedDisplay = static_cast<int>(m_displayManager.GetPrimaryDisplayIndex());
     }
 
     void DetectUSBDevices() {
@@ -1010,7 +1010,7 @@ private:
                         for (size_t i = 0; i < g_availableGPUs.size(); i++) {
                             const bool isSelected = (m_selectedGPU == (int)i);
                             std::string gpuLabel = WStringToString(g_availableGPUs[i].name) + " (Score: " + std::to_string((int)g_availableGPUs[i].performanceScore) + ")";
-                            if (ImGui::Selectable(gpuLabel.c_str(), isSelected)) m_selectedGPU = i;
+                            if (ImGui::Selectable(gpuLabel.c_str(), isSelected)) m_selectedGPU = static_cast<int>(i);
                         }
                         ImGui::EndListBox();
                     }
@@ -1028,7 +1028,7 @@ private:
                     if (ImGui::BeginListBox("##Displays", ImVec2(-1, 60))) {
                         for (size_t i = 0; i < m_displayNames.size(); i++) {
                             const bool isSelected = (m_selectedDisplay == (int)i);
-                            if (ImGui::Selectable(m_displayNames[i].c_str(), isSelected)) m_selectedDisplay = i;
+                            if (ImGui::Selectable(m_displayNames[i].c_str(), isSelected)) m_selectedDisplay = static_cast<int>(i);
                         }
                         ImGui::EndListBox();
                     }
@@ -1074,7 +1074,7 @@ private:
                         if (ImGui::BeginListBox("##USBDevices", ImVec2(-1, 60))) {
                             for (size_t i = 0; i < m_usbDeviceNames.size(); i++) {
                                 const bool isSelected = (m_selectedUSBDevice == (int)i);
-                                if (ImGui::Selectable(m_usbDeviceNames[i].c_str(), isSelected)) m_selectedUSBDevice = i;
+                                if (ImGui::Selectable(m_usbDeviceNames[i].c_str(), isSelected)) m_selectedUSBDevice = static_cast<int>(i);
                             }
                             ImGui::EndListBox();
                         }

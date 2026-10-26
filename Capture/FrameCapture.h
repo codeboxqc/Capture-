@@ -141,6 +141,8 @@ private:
 
         // Calculate keyframe interval (every 1 second to match encoder GOP)
         const uint32_t keyframeInterval = m_targetFPS > 0 ? m_targetFPS : 60;
+        ComPtr<ID3D11Texture2D> lastDesktopTexture;
+        D3D11_TEXTURE2D_DESC lastDesc = {};
 
         while (m_running) {
             auto now = std::chrono::steady_clock::now();
@@ -154,10 +156,41 @@ private:
             ComPtr<IDXGIResource> desktopResource;
             DXGI_OUTDUPL_FRAME_INFO frameInfo;
 
-            hr = duplication->AcquireNextFrame(100, &frameInfo, &desktopResource);
+            hr = duplication->AcquireNextFrame(16, &frameInfo, &desktopResource);
             if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-                // Desktop is static. Advance clock and continue.
                 nextFrameTime = now + frameDuration;
+                // Re-emit last valid desktop frame so CFR cadence & MouseCapture overlays remain active on static screens
+                if (lastDesktopTexture && lastDesc.Width > 0 && lastDesc.Height > 0) {
+                    ComPtr<ID3D11Texture2D> destTexture = GetRingBufferTexture(lastDesc.Width, lastDesc.Height, lastDesc.Format);
+                    if (destTexture) {
+                        m_sharedD3D11Context->CopyResource(destTexture.Get(), lastDesktopTexture.Get());
+                        uint64_t currentFrameIndex = m_frameCount.fetch_add(1);
+                        CapturedFrame frame;
+                        frame.texture = destTexture;
+                        LARGE_INTEGER qpcFreq, qpcNow;
+                        QueryPerformanceFrequency(&qpcFreq);
+                        QueryPerformanceCounter(&qpcNow);
+                        frame.timestamp = (qpcNow.QuadPart * 1000000ULL) / qpcFreq.QuadPart;
+                        frame.frameIndex = static_cast<uint32_t>(currentFrameIndex);
+                        frame.isKeyframe = (currentFrameIndex == 0) || (currentFrameIndex % keyframeInterval == 0);
+                        frame.hdrMetadata = false;
+
+                        ComPtr<ID3D11Texture2D> textureToReturn = nullptr;
+                        {
+                            std::lock_guard<std::mutex> lock(m_bufferMutex);
+                            if (m_ringBuffer.size() >= m_ringBufferSize) {
+                                textureToReturn = m_ringBuffer.front().texture;
+                                m_ringBuffer.pop();
+                                m_droppedFrames++;
+                            }
+                            m_ringBuffer.push(frame);
+                        }
+                        if (textureToReturn) {
+                            ReturnTexture(textureToReturn);
+                        }
+                        m_frameAvailable.notify_one();
+                    }
+                }
                 continue;
             }
             if (FAILED(hr)) {
@@ -194,6 +227,20 @@ private:
                     spdlog::error("Failed to allocate ring buffer texture");
                     duplication->ReleaseFrame();
                     continue;
+                }
+
+                // Cache latest GPU texture for static-screen frame duplication
+                if (!lastDesktopTexture || lastDesc.Width != srcDesc.Width || lastDesc.Height != srcDesc.Height || lastDesc.Format != srcDesc.Format) {
+                    lastDesc = srcDesc;
+                    D3D11_TEXTURE2D_DESC cacheDesc = srcDesc;
+                    cacheDesc.Usage = D3D11_USAGE_DEFAULT;
+                    cacheDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    cacheDesc.CPUAccessFlags = 0;
+                    cacheDesc.MiscFlags = 0;
+                    m_sharedD3D11Device->CreateTexture2D(&cacheDesc, nullptr, &lastDesktopTexture);
+                }
+                if (lastDesktopTexture) {
+                    m_sharedD3D11Context->CopyResource(lastDesktopTexture.Get(), sourceTexture.Get());
                 }
 
                 // GPU memory copy

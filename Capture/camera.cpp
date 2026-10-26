@@ -30,8 +30,8 @@ std::vector<CameraInfo> CameraCapture::DetectLocalCameras() {
     // Attempting to list devices - FFmpeg handles this gracefully but prints to stderr
     // A more native approach uses MediaFoundation, but we provide FFmpeg dshow fallback
     avformat_open_input(&fmt_ctx, "video=dummy", iformat, &options);
-    
-    avformat_free_context(fmt_ctx);
+    av_dict_free(&options);
+    avformat_close_input(&fmt_ctx);
     return cameras;
 }
 
@@ -58,12 +58,15 @@ bool CameraCapture::Initialize(const std::string& url, Microsoft::WRL::ComPtr<ID
     }
 
     if (avformat_open_input(&m_formatCtx, url.c_str(), ifmt, &options) != 0) {
+        av_dict_free(&options);
         spdlog::error("Camera: Failed to open stream {}", url);
         return false;
     }
+    av_dict_free(&options);
 
     if (avformat_find_stream_info(m_formatCtx, nullptr) < 0) {
         spdlog::error("Camera: Failed to find stream info");
+        avformat_close_input(&m_formatCtx);
         return false;
     }
 
@@ -76,10 +79,16 @@ bool CameraCapture::Initialize(const std::string& url, Microsoft::WRL::ComPtr<ID
 
     if (m_videoStreamIndex == -1) {
         spdlog::error("Camera: No video stream found");
+        avformat_close_input(&m_formatCtx);
         return false;
     }
 
     const AVCodec* codec = avcodec_find_decoder(m_formatCtx->streams[m_videoStreamIndex]->codecpar->codec_id);
+    if (!codec) {
+        spdlog::error("Camera: Unsupported video codec");
+        avformat_close_input(&m_formatCtx);
+        return false;
+    }
     m_codecCtx = avcodec_alloc_context3(codec);
     m_streamWidth = m_formatCtx->streams[m_videoStreamIndex]->codecpar->width;
     m_streamHeight = m_formatCtx->streams[m_videoStreamIndex]->codecpar->height;
@@ -91,6 +100,8 @@ bool CameraCapture::Initialize(const std::string& url, Microsoft::WRL::ComPtr<ID
 
     if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
         spdlog::error("Camera: Failed to open decoder");
+        avcodec_free_context(&m_codecCtx);
+        avformat_close_input(&m_formatCtx);
         return false;
     }
 
@@ -118,6 +129,15 @@ void CameraCapture::Stop() {
     if (m_swsCtx) { sws_freeContext(m_swsCtx); m_swsCtx = nullptr; }
     if (m_codecCtx) { avcodec_free_context(&m_codecCtx); m_codecCtx = nullptr; }
     if (m_formatCtx) { avformat_close_input(&m_formatCtx); m_formatCtx = nullptr; }
+    {
+        std::lock_guard<std::mutex> lock(m_frameMutex);
+        m_latestFrame.texture.Reset();
+        m_hasNewFrame = false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_poolMutex);
+        m_texturePool.clear();
+    }
 }
 
 bool CameraCapture::GetNextFrame(CameraFrame& outFrame, int timeoutMs) {
@@ -156,10 +176,16 @@ Microsoft::WRL::ComPtr<ID3D11Texture2D> CameraCapture::CreateStagingTexture(int 
 
 Microsoft::WRL::ComPtr<ID3D11Texture2D> CameraCapture::GetTextureFromPool(int width, int height) {
     std::lock_guard<std::mutex> lock(m_poolMutex);
-    if (!m_texturePool.empty()) {
+    while (!m_texturePool.empty()) {
         auto tex = m_texturePool.back();
         m_texturePool.pop_back();
-        return tex;
+        if (tex) {
+            D3D11_TEXTURE2D_DESC desc;
+            tex->GetDesc(&desc);
+            if ((int)desc.Width == width && (int)desc.Height == height) {
+                return tex;
+            }
+        }
     }
     return CreateStagingTexture(width, height);
 }
