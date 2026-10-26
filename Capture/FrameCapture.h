@@ -4,21 +4,21 @@
 
 struct CapturedFrame {
     ComPtr<ID3D11Texture2D> texture;
-    uint64_t timestamp;
-    uint32_t frameIndex;
-    bool isKeyframe; // This must match the name used in ProcessLoop
-    bool hdrMetadata;
+    uint64_t timestamp = 0;       
+    uint32_t frameIndex = 0;       
+    bool isKeyframe = false;       
+    bool hdrMetadata = false;      
 };
 
 class FrameCapture {
 public:
     FrameCapture()
         : m_running(false)
-        , m_frameCount(0)          // FIX: Explicitly initialize
+        , m_frameCount(0)           
         , m_needsStaging(false)
         , m_targetFPS(60)
         , m_ringBufferSize(8)
-        , m_droppedFrames(0)       // FIX: Track dropped frames
+        , m_droppedFrames(0)       
     {
     }
 

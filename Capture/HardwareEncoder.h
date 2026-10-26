@@ -9,8 +9,8 @@ extern "C" {
 
 struct EncodedPacket {
     std::shared_ptr<AVPacket> pkt;
-    int64_t pts;
-    bool keyframe;
+    int64_t pts = 0;             
+    bool keyframe = false;       
 };
 
 class HardwareEncoder {

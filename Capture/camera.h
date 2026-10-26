@@ -25,7 +25,7 @@ struct CameraInfo {
 
 struct CameraFrame {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-    uint64_t timestamp;
+    uint64_t timestamp=0;
 };
 
 class CameraCapture {

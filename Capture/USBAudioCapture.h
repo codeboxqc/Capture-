@@ -15,17 +15,17 @@
 struct USBAudioDeviceInfo {
     std::string name;
     std::string symbolicLink;
-    int index;
-    bool isCapture;
+    int index = 0;                
+    bool isCapture = false;       
 };
 
 // Audio packet from USB capture
 struct USBAudioPacket {
     std::vector<uint8_t> data;
-    uint64_t timestamp;       // QPC microseconds, anchored to same clock as video
-    uint32_t sampleRate;
-    uint16_t channels;
-    uint16_t bitsPerSample;
+    uint64_t timestamp = 0;      
+    uint32_t sampleRate = 0;     
+    uint16_t channels = 0;        
+    uint16_t bitsPerSample = 0;   
 };
 
 class USBAudioCapture {

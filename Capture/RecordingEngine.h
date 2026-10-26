@@ -71,12 +71,12 @@ enum class ContainerFormat { MKV, MP4, RAW };
 struct GPUInfo {
     std::wstring name;
     std::wstring vendorId;
-    uint64_t dedicatedVideoMemory;
-    uint64_t sharedSystemMemory;
-    EncoderType encoderType;
-    bool supportsAV1;
-    bool supportsHDR;
-    LUID adapterLuid; // Added to map exact hardware across DirectX
+    uint64_t dedicatedVideoMemory = 0;                     
+    uint64_t sharedSystemMemory = 0;                       
+    EncoderType encoderType = EncoderType::SOFTWARE;      
+    bool supportsAV1 = false;                              
+    bool supportsHDR = false;                              
+    LUID adapterLuid = { 0, 0 };                          
 };
 
 // ========== GPU Capabilities ==========
