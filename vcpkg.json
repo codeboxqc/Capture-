@@ -1,0 +1,16 @@
+{
+  "name": "captureapp",
+  "version-string": "1.0.0",
+  "dependencies": [
+    "spdlog",
+    "nlohmann-json",
+    {
+      "name": "imgui",
+      "features": ["win32-binding", "dx11-binding"]
+    },
+    {
+      "name": "ffmpeg",
+      "features": ["avdevice", "avcodec", "avformat", "swscale"]
+    }
+  ]
+}
