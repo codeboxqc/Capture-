@@ -191,9 +191,10 @@ private:
     void DetectAllDisplays() {
         m_availableDisplays.clear();
 
-        // Use EnumDisplayDevices for more detailed info
-        DISPLAY_DEVICE displayDevice;
-        displayDevice.cb = sizeof(DISPLAY_DEVICE);
+        // Use DISPLAY_DEVICEW explicitly
+        DISPLAY_DEVICEW displayDevice;
+        ZeroMemory(&displayDevice, sizeof(displayDevice));
+        displayDevice.cb = sizeof(DISPLAY_DEVICEW);
 
         for (UINT i = 0; EnumDisplayDevicesW(nullptr, i, &displayDevice, 0); i++) {
             // Skip mirroring devices
@@ -210,10 +211,10 @@ private:
             info.displayName = displayDevice.DeviceName;
 
             // Convert wide string to regular string for device name
-            int size_needed = WideCharToMultiByte(CP_UTF8, 0, &displayDevice.DeviceName[0],
+            int size_needed = WideCharToMultiByte(CP_UTF8, 0, displayDevice.DeviceName,
                 (int)wcslen(displayDevice.DeviceName), nullptr, 0, nullptr, nullptr);
             info.deviceName.resize(size_needed, 0);
-            WideCharToMultiByte(CP_UTF8, 0, &displayDevice.DeviceName[0],
+            WideCharToMultiByte(CP_UTF8, 0, displayDevice.DeviceName,
                 (int)wcslen(displayDevice.DeviceName), &info.deviceName[0], size_needed, nullptr, nullptr);
 
             info.isPrimary = (displayDevice.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
